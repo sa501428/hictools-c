@@ -146,6 +146,10 @@ Computes:
 - **SCALE** — Matrix balancing via iterative normalization (intra-chromosomal only)
 
 Normalized expected value vectors are also computed and stored for each norm type.
+SCALE first attempts to balance all nonempty rows from a `sqrt(VC)` starting
+vector. If either vector convergence or the maximum balanced row-sum error
+(`0.05`) fails, progressively stricter nonzero-count cutoffs are tried up to the
+20th-percentile coverage bound.
 
 ### Usage
 

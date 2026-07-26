@@ -8,7 +8,9 @@
 //   Find vector b[] such that (D * A * D) ≈ J  (Jacobian / doubly stochastic)
 //   where D = diag(b).
 //
-// Low-coverage rows (nz < threshold) are masked as NaN in the output.
+// The first attempt includes every non-empty row and starts from sqrt(VC).
+// If convergence or the balanced row-sum check fails, progressively stricter
+// low-coverage cutoffs are tried. Excluded rows are masked as NaN.
 // Returns the normalization vector b[] of length k (n_bins).
 
 #include <cstdint>
@@ -17,8 +19,8 @@
 
 struct ScaleParams {
     double tolerance      = 1.0e-4;  // convergence tolerance
+    double row_sum_tolerance = 5.0e-2; // max |b[i] * (A*b)[i] - 1|
     double delta          = 5.0e-2;  // convergence rate threshold
-    double percentile     = 0.01;    // low-coverage row exclusion percentile
     int    max_iter       = 1000;    // max iterations per perc level
     int    total_max_iter = 2000;    // absolute max iterations
     int    num_threads    = 1;       // threads for matrix-vector multiply

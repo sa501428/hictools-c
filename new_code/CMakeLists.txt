@@ -86,6 +86,14 @@ if(BUILD_TESTING AND UNIX)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_contiguous_pair_streaming.sh
             $<TARGET_FILE:hic_pre>
   )
+
+  add_executable(test_scale_norm
+      tests/test_scale_norm.cpp
+      hic_addnorm/scale_norm.cpp
+  )
+  target_include_directories(test_scale_norm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(test_scale_norm PRIVATE Threads::Threads)
+  add_test(NAME scale_norm_all_nonempty_rows COMMAND test_scale_norm)
 endif()
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")

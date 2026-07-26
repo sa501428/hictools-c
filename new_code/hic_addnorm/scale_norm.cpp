@@ -69,6 +69,29 @@ static void utmv_mul(
     }
 }
 
+// Maximum deviation from unit row sums in D*A*D for retained rows.
+static double balanced_row_sum_error(
+    const std::vector<uint32_t>& row,
+    const std::vector<uint32_t>& col,
+    const std::vector<float>& val,
+    long m,
+    const double* b,
+    const std::vector<int>& bad,
+    uint32_t k,
+    int threads,
+    std::vector<std::vector<double>>& workspace)
+{
+    std::vector<double> ab(k, 0.0);
+    utmv_mul(row, col, val, m, b, k, ab.data(), threads, workspace);
+
+    double error = 0.0;
+    for (uint32_t p = 0; p < k; p++) {
+        if (bad[p]) continue;
+        error = std::max(error, std::fabs(ab[p] * b[p] - 1.0));
+    }
+    return error;
+}
+
 // --------------------------------------------------------------------------
 // Post-process: scale b so that (b^T A b) / (1^T A 1) = 1
 // From d_ppNormVector.c
@@ -128,12 +151,12 @@ int scale_balance(
     const ScaleParams& params)
 {
     const double tol      = params.tolerance;
+    const double rs_tol   = params.row_sum_tolerance;
     const double del      = params.delta;
     int threads           = params.num_threads;
     int maxiter           = params.max_iter;
     int total_max         = params.total_max_iter;
     int width             = params.diag_width;
-    double perc_in        = params.percentile;
 
     const uint32_t* ii = ii_vec.data();
     const uint32_t* jj = jj_vec.data();
@@ -143,7 +166,7 @@ int scale_balance(
     double* b = norm_vec.data();
 
     // Allocate working arrays
-    std::vector<double> current(k), row_s(k), col_s(k), dr(k), dc(k), s_v(k), one_v(k);
+    std::vector<double> current(k), row_s(k), col_s(k), dr(k), dc(k), one_v(k);
     std::vector<int>    bad(k, 0), bad0(k, 0);
     std::vector<double> b_conv(k), b0(k);
     std::vector<int>    bad_conv(k, 0);
@@ -164,11 +187,14 @@ int scale_balance(
     n0 = (uint32_t)nz0.size();
     std::sort(nz0.begin(), nz0.end());
 
-    int junk = (int)(n0 * 0.2);
-    int bound = (n0 > 0) ? nz0[junk] : 0;
-    junk = (int)(n0 * perc_in);
-    int low   = (n0 > 0) ? nz0[junk] : 0;
-    int low0  = low;
+    if (n0 == 0) return 0;
+
+    // Match Java's initial policy: first try every non-empty row. Preserve the
+    // C++ policy of allowing the adaptive cutoff to rise as far as the row-count
+    // value at the 20th percentile.
+    int bound = nz0[(size_t)(n0 * 0.2)];
+    int low   = 1;
+    int low0  = 1;
 
     // Diagonal-only filtering (optional)
     std::vector<float> diag_v(k, 0.0f);
@@ -191,18 +217,23 @@ int scale_balance(
         }
     }
 
-    // Initial bad rows (too few non-zeros)
+    // Initial bad rows: only empty rows (plus an optional diagonal mask).
     for (uint32_t p = 0; p < k; p++) if (nz[p] < low) bad[p] = 1;
     for (uint32_t p = 0; p < k; p++) bad[p] |= bad0[p];
     for (uint32_t p = 0; p < k; p++) one_v[p] = 1.0 - bad[p];
-    for (uint32_t p = 0; p < k; p++) dr[p] = 1.0 - bad[p];
-    for (uint32_t p = 0; p < k; p++) dc[p] = 1.0 - bad[p];
 
-    for (uint32_t p = 0; p < k; p++) current[p] = std::sqrt(dr[p] * dc[p]);
-
-    // Initial row sums
-    utmv_mul(ii_vec, jj_vec, xx_vec, m, dc.data(), k, row_s.data(), threads, ws);
-    for (uint32_t p = 0; p < k; p++) row_s[p] *= dr[p];
+    // Match Java's first-attempt initialization. Java computes raw VC, sets
+    // dr=dc=sqrt(VC), and initializes row=(A*one)*dr. Cutoff retries below
+    // intentionally reset dr/dc to 1 for retained rows, also matching Java.
+    std::vector<double> raw_vc(k, 0.0);
+    utmv_mul(ii_vec, jj_vec, xx_vec, m, one_v.data(), k,
+             raw_vc.data(), threads, ws);
+    for (uint32_t p = 0; p < k; p++) {
+        dr[p] = bad[p] ? 0.0 : std::sqrt(raw_vc[p]);
+        dc[p] = dr[p];
+        current[p] = dr[p];
+        row_s[p] = raw_vc[p] * dr[p];
+    }
 
     double ber     = 10.0 * (1.0 + tol);
     int    iter    = 0;
@@ -210,8 +241,10 @@ int scale_balance(
     bool   conv    = false, div_flag = false;
     double low_conv = 1000.0, low_div = 0.0;
     double ber_conv = tol;
+    double row_error_conv = std::numeric_limits<double>::infinity();
     bool   yes     = true;
     const double erez = 1.0e-4;
+    bool   accepted = false;
 
     std::vector<double> report(total_max + 10, 0.0);
 
@@ -247,18 +280,33 @@ int scale_balance(
         for (uint32_t p = 0; p < k; p++) b0[p] = current[p];
         for (uint32_t p = 0; p < k; p++) current[p] = b[p];
 
+        bool row_sum_failed = false;
+        double row_sum_error = std::numeric_limits<double>::infinity();
         if (ber < tol) {
-            // Converged
+            row_sum_error = balanced_row_sum_error(
+                ii_vec, jj_vec, xx_vec, m, b, bad, k, threads, ws);
+            row_sum_failed = !(row_sum_error <= rs_tol);
+        }
+
+        if (ber < tol && !row_sum_failed) {
+            // Both the scaling vector and balanced row sums converged.
             ber_conv  = ber;
+            row_error_conv = row_sum_error;
             low_conv  = low;
             yes       = true;
-            if (low <= low0) break;
+            if (low <= low0) {
+                accepted = true;
+                break;
+            }
             conv = true;
             for (uint32_t p = 0; p < k; p++) b_conv[p] = b[p];
             for (uint32_t p = 0; p < k; p++) bad_conv[p] = bad[p];
 
             if (div_flag) {
-                if (low_conv - low_div <= 1) break;
+                if (low_conv - low_div <= 1) {
+                    accepted = true;
+                    break;
+                }
                 low = (int)((low_conv + low_div) / 2);
             } else {
                 low = (int)(low_conv / 2);
@@ -274,13 +322,17 @@ int scale_balance(
             continue;
         }
 
-        if (iter <= 5) continue;
+        // A stable vector with row sums outside tolerance is a failed cutoff,
+        // not a reason to keep iterating the same matrix.
+        if (!row_sum_failed) {
+            if (iter <= 5) continue;
 
-        // Check convergence rate
-        int prev = all_iter - 6;
-        if (prev >= 0 && (report[all_iter - 1] * (1.0 + del) < report[prev])) continue;
+            // Check convergence rate
+            int prev = all_iter - 6;
+            if (prev >= 0 && (report[all_iter - 1] * (1.0 + del) < report[prev])) continue;
+        }
 
-        // Diverged
+        // This cutoff either diverged/stalled or produced unacceptable row sums.
         div_flag  = true;
         low_div   = low;
 
@@ -289,8 +341,10 @@ int scale_balance(
                 for (uint32_t p = 0; p < k; p++) b[p] = b_conv[p];
                 for (uint32_t p = 0; p < k; p++) bad[p] = bad_conv[p];
                 ber = ber_conv;
+                row_sum_error = row_error_conv;
+                accepted = true;
                 break;
-            } else if (((double)numBad) / n0 < erez && yes) {
+            } else if (!row_sum_failed && ((double)numBad) / n0 < erez && yes) {
                 // Erez's trick: mark slow-converging rows as bad
                 for (uint32_t p = 0; p < k; p++) {
                     if (bad[p]) continue;
@@ -303,7 +357,7 @@ int scale_balance(
                 low = (int)((low_div + low_conv) / 2);
                 yes = true;
             }
-        } else if (((double)numBad) / n0 < erez && yes) {
+        } else if (!row_sum_failed && ((double)numBad) / n0 < erez && yes) {
             for (uint32_t p = 0; p < k; p++) {
                 if (bad[p]) continue;
                 double t1 = std::fabs((b[p] - b0[p]) / (b[p] + b0[p] + 1e-300));
@@ -330,15 +384,12 @@ int scale_balance(
         if (all_iter >= total_max) break;
     }
 
-    // Final: mark bad rows as NaN
-    for (uint32_t p = 0; p < k; p++) if (bad[p]) b[p] = std::numeric_limits<double>::quiet_NaN();
-
-    // If >20% of rows excluded, set all to NaN (convergence failure)
-    int final_junk = 0;
-    for (int v : nz0) if (v < (int)low_conv) final_junk++;
-    double final_perc = (n0 > 0) ? (double)final_junk / n0 : 0.0;
-    if (final_perc > 0.2) {
+    if (!accepted) {
         for (uint32_t p = 0; p < k; p++) b[p] = std::numeric_limits<double>::quiet_NaN();
+    } else {
+        for (uint32_t p = 0; p < k; p++) {
+            if (bad[p]) b[p] = std::numeric_limits<double>::quiet_NaN();
+        }
     }
 
     return all_iter;
