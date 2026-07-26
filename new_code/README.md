@@ -108,15 +108,15 @@ little-endian Juicer formats.
 
 | Format | Fields | Description |
 |--------|--------|-------------|
-| Extra short | `chr1 pos1 chr2 pos2` | Minimal 4-column format |
-| Extra short w/ score | `chr1 pos1 chr2 pos2 score` | 4-column with contact weight |
-| Short (MND) | `str1 chr1 pos1 frag1 str2 chr2 pos2 frag2` | Standard Juicer short format |
-| Short w/ score | `str1 chr1 pos1 frag1 str2 chr2 pos2 frag2 score` | Short + contact weight |
-| Old MND | `…frag2 mapq1 mapq2` | Short + MAPQ columns |
-| New MND | `…frag2 mapq1 mapq2 score` | Short + MAPQ + score |
-| Medium | `readname str1 chr1 pos1 frag1 str2 chr2 pos2 frag2 mapq1 mapq2` | Medium format with read name |
-| Long (Juicer) | `str1 chr1 pos1 frag1 str2 chr2 pos2 frag2 mapq1 cigar1 seq1 mapq2 …` | Full merged_nodups format |
-| 4DN/DCIC pairs | `readID chr1 pos1 chr2 pos2 strand1 strand2 […]` | `.pairs`; optional `frag1`/`frag2` and `mapq1`/`mapq2` pairs are located from `#columns:` and may appear in any order |
+| Extra short | `<chr1> <pos1> <chr2> <pos2>` | Minimal 4-column format |
+| Extra short with score | `<chr1> <pos1> <chr2> <pos2> <score>` | Extra short plus contact weight |
+| Short | `<str1> <chr1> <pos1> <frag1> <str2> <chr2> <pos2> <frag2>` | Standard 8-column Juicer short format |
+| Short with score | `<str1> <chr1> <pos1> <frag1> <str2> <chr2> <pos2> <frag2> <score>` | Short plus contact weight |
+| Old short MND with MAPQ | `<str1> <chr1> <pos1> <frag1> <str2> <chr2> <pos2> <frag2> <mapq1> <mapq2>` | 10-column short format with MAPQ |
+| New short MND with MAPQ and score | `<str1> <chr1> <pos1> <frag1> <str2> <chr2> <pos2> <frag2> <mapq1> <mapq2> <score>` | 11-column short format with MAPQ and contact weight |
+| Medium | `<readname> <str1> <chr1> <pos1> <frag1> <str2> <chr2> <pos2> <frag2> <mapq1> <mapq2>` | Medium format with read name |
+| Long (Juicer) | `<str1> <chr1> <pos1> <frag1> <str2> <chr2> <pos2> <frag2> <mapq1> <cigar1> <sequence1> <mapq2> <cigar2> <sequence2> <readname1> <readname2>` | Full 16-column merged_nodups format |
+| 4DN/DCIC pairs | `<readID> <chr1> <pos1> <chr2> <pos2> <strand1> <strand2> […]` | `.pairs`; optional `frag1`/`frag2` and `mapq1`/`mapq2` pairs are located from `#columns:` and may appear in any order |
 | Juicer binary | `.bin` fixed 26-byte records | Strand, chromosome index, position, and fragment for both ends |
 | Juicer short binary | `.bn` fixed 20-byte records | Chromosome index and position for both ends, plus a floating-point score |
 
