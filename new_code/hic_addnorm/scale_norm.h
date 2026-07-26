@@ -10,7 +10,9 @@
 //
 // The first attempt includes every non-empty row and starts from sqrt(VC).
 // If convergence or the balanced row-sum check fails, progressively stricter
-// low-coverage cutoffs are tried. Excluded rows are masked as NaN.
+// low-coverage cutoffs are tried. A converged vector with isolated offending
+// rows gets one targeted masking retry at the same cutoff. Excluded rows are
+// masked as NaN.
 // Returns the normalization vector b[] of length k (n_bins).
 
 #include <cstdint>

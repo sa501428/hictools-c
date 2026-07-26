@@ -149,7 +149,9 @@ Normalized expected value vectors are also computed and stored for each norm typ
 SCALE first attempts to balance all nonempty rows from a `sqrt(VC)` starting
 vector. If either vector convergence or the maximum balanced row-sum error
 (`0.05`) fails, progressively stricter nonzero-count cutoffs are tried up to the
-20th-percentile coverage bound.
+more permissive of the 20th-percentile coverage bound or a raw row-count
+z-score of -1. A converged vector with row-sum outliers gets one targeted retry
+with only those offending rows masked before the global cutoff is increased.
 
 ### Usage
 

@@ -11,3 +11,4 @@ test.txt.gz
 /new_code/validation/__pycache__
 /new_code/full-validation-results
 /new_code/scale-validation-results
+/new_code/scale-rescue-validation-results

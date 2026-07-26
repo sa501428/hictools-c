@@ -79,15 +79,22 @@ static double balanced_row_sum_error(
     const std::vector<int>& bad,
     uint32_t k,
     int threads,
-    std::vector<std::vector<double>>& workspace)
+    std::vector<std::vector<double>>& workspace,
+    std::vector<int>* offending_rows = nullptr,
+    double tolerance = 0.0)
 {
     std::vector<double> ab(k, 0.0);
     utmv_mul(row, col, val, m, b, k, ab.data(), threads, workspace);
 
+    if (offending_rows) offending_rows->clear();
     double error = 0.0;
     for (uint32_t p = 0; p < k; p++) {
         if (bad[p]) continue;
-        error = std::max(error, std::fabs(ab[p] * b[p] - 1.0));
+        double row_error = std::fabs(ab[p] * b[p] - 1.0);
+        error = std::max(error, row_error);
+        if (offending_rows && row_error > tolerance) {
+            offending_rows->push_back((int)p);
+        }
     }
     return error;
 }
@@ -189,10 +196,22 @@ int scale_balance(
 
     if (n0 == 0) return 0;
 
-    // Match Java's initial policy: first try every non-empty row. Preserve the
-    // C++ policy of allowing the adaptive cutoff to rise as far as the row-count
-    // value at the 20th percentile.
-    int bound = nz0[(size_t)(n0 * 0.2)];
+    // Match Java's initial policy: first try every non-empty row. The adaptive
+    // cutoff may rise to the more permissive of:
+    //   * the row-count value at the 20th percentile, or
+    //   * the integer cutoff corresponding to a raw row-count z-score of -1.
+    int percentile_bound = nz0[(size_t)(n0 * 0.2)];
+    double nz_mean = 0.0;
+    for (int value : nz0) nz_mean += value;
+    nz_mean /= n0;
+    double nz_variance = 0.0;
+    for (int value : nz0) {
+        double delta_nz = value - nz_mean;
+        nz_variance += delta_nz * delta_nz;
+    }
+    nz_variance /= n0;
+    int zscore_bound = std::max(1, (int)std::ceil(nz_mean - std::sqrt(nz_variance)));
+    int bound = std::max(percentile_bound, zscore_bound);
     int low   = 1;
     int low0  = 1;
 
@@ -245,6 +264,7 @@ int scale_balance(
     bool   yes     = true;
     const double erez = 1.0e-4;
     bool   accepted = false;
+    bool   row_rescue_available = true;
 
     std::vector<double> report(total_max + 10, 0.0);
 
@@ -282,9 +302,11 @@ int scale_balance(
 
         bool row_sum_failed = false;
         double row_sum_error = std::numeric_limits<double>::infinity();
+        std::vector<int> row_sum_offenders;
         if (ber < tol) {
             row_sum_error = balanced_row_sum_error(
-                ii_vec, jj_vec, xx_vec, m, b, bad, k, threads, ws);
+                ii_vec, jj_vec, xx_vec, m, b, bad, k, threads, ws,
+                &row_sum_offenders, rs_tol);
             row_sum_failed = !(row_sum_error <= rs_tol);
         }
 
@@ -315,7 +337,27 @@ int scale_balance(
             for (uint32_t p = 0; p < k; p++) { bad[p] = 0; one_v[p] = 1.0; }
             for (uint32_t p = 0; p < k; p++) if (nz[p] < low) bad[p] = 1;
             for (uint32_t p = 0; p < k; p++) { bad[p] |= bad0[p]; one_v[p] = 1 - bad[p]; }
+            row_rescue_available = true;
             iter = 0; ber = 10.0;
+            for (uint32_t p = 0; p < k; p++) dr[p] = dc[p] = 1.0 - bad[p];
+            utmv_mul(ii_vec, jj_vec, xx_vec, m, dc.data(), k, row_s.data(), threads, ws);
+            for (uint32_t p = 0; p < k; p++) row_s[p] *= dr[p];
+            continue;
+        }
+
+        // A converged vector can still contain retained rows that became
+        // effectively disconnected after sparse neighbors were masked. Give
+        // the cutoff one targeted rescue: mask only rows whose balanced row-sum
+        // error exceeds tolerance, then retry before increasing the global
+        // nonzero-count cutoff.
+        if (row_sum_failed && row_rescue_available && !row_sum_offenders.empty()) {
+            for (int p : row_sum_offenders) {
+                bad[(size_t)p] = 1;
+                one_v[(size_t)p] = 0.0;
+            }
+            row_rescue_available = false;
+            ber = 10.0;
+            iter = 0;
             for (uint32_t p = 0; p < k; p++) dr[p] = dc[p] = 1.0 - bad[p];
             utmv_mul(ii_vec, jj_vec, xx_vec, m, dc.data(), k, row_s.data(), threads, ws);
             for (uint32_t p = 0; p < k; p++) row_s[p] *= dr[p];
@@ -366,13 +408,16 @@ int scale_balance(
             yes = false;
             goto next_iter;
         } else {
-            low = 2 * low;
+            int next_low = std::min(2 * low, bound);
+            if (next_low <= low) break;
+            low = next_low;
             yes = true;
         }
 
         for (uint32_t p = 0; p < k; p++) bad[p] = 0;
         for (uint32_t p = 0; p < k; p++) if (nz[p] < low) bad[p] = 1;
         for (uint32_t p = 0; p < k; p++) { bad[p] |= bad0[p]; one_v[p] = 1 - bad[p]; }
+        row_rescue_available = true;
 
     next_iter:
         ber = 10.0; iter = 0;
