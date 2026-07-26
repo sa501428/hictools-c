@@ -1,9 +1,11 @@
 #include "pair_parser.h"
+#include "little_endian.h"
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
 #include <cctype>
+#include <vector>
 
 // ============================================================
 //  Helpers
@@ -48,9 +50,11 @@ static const char* next_field(const char* p, char* field, size_t max_len) {
 InputFormat detect_format(const std::string& path) {
     // Extension-based detection first
     std::string p = path;
+    if (ends_with(p, ".bin")) return InputFormat::BIN;
+    if (ends_with(p, ".bn")) return InputFormat::BN;
     if (ends_with(p, ".gz")) p = p.substr(0, p.size() - 3);
 
-    // Only use extension for unambiguous formats
+    // Text formats may be gzip-compressed.
     if (ends_with(p, ".pairs")) return InputFormat::PAIRS;
     if (ends_with(p, ".mnd")) return InputFormat::MND;
     // .txt is ambiguous — fall through to content detection
@@ -161,8 +165,8 @@ private:
         out.pos2  = std::max(0, (int)std::atol(fields[o+6]));
         out.frag2 = std::atoi(fields[o+7]);
 
-        out.mapq1 = 255;
-        out.mapq2 = 255;
+        out.mapq1 = 1000;
+        out.mapq2 = 1000;
         out.score = 1.0f;
 
         int eff = nf - o; // effective field count after readname offset
@@ -242,7 +246,7 @@ private:
         out.pos2   = std::max(0, (int)std::atol(f[3]));
         out.strand1 = out.strand2 = 0;
         out.frag1 = out.frag2 = 0;
-        out.mapq1 = out.mapq2 = 255;
+        out.mapq1 = out.mapq2 = 1000;
         out.score  = (nf >= 5) ? (float)std::atof(f[4]) : 1.0f;
         return true;
     }
@@ -259,8 +263,7 @@ public:
     PairsIterator(const std::string& path, const Genome& genome)
         : genome_(genome), is_pipe_(ends_with(path, ".gz")) {
         file_ = open_maybe_gz(path);
-        // Parse header: scan comment lines for #columns: to locate frag1/frag2 columns.
-        // The 4DN spec reserves the first 7 cols as fixed; frag1/frag2 may appear after col 6.
+        // Parse header: scan #columns: to locate optional fragment and MAPQ columns.
         char line[4096];
         while (fgets(line, sizeof(line), file_)) {
             if (line[0] != '#') {
@@ -275,9 +278,13 @@ public:
                 int ci = 0;
                 frag1_col_ = -1;
                 frag2_col_ = -1;
+                mapq1_col_ = -1;
+                mapq2_col_ = -1;
                 while ((q = next_field(q, col, sizeof(col))) != nullptr) {
                     if (strcmp(col, "frag1") == 0) frag1_col_ = ci;
                     if (strcmp(col, "frag2") == 0) frag2_col_ = ci;
+                    if (strcmp(col, "mapq1") == 0) mapq1_col_ = ci;
+                    if (strcmp(col, "mapq2") == 0) mapq2_col_ = ci;
                     ci++;
                 }
             }
@@ -315,12 +322,17 @@ private:
     std::string first_line_;
     int   frag1_col_ = -1; // column index (0-based) of frag1 in data lines, -1 if absent
     int   frag2_col_ = -1;
+    int   mapq1_col_ = -1;
+    int   mapq2_col_ = -1;
 
     bool parse_pairs_line(const char* line, AlignmentPair& out) {
         // readID chr1 pos1 chr2 pos2 strand1 strand2 [extra columns...]
         // Maximum columns we ever need: frag1/frag2 can appear at any position > 6.
         // Read enough to cover whatever frag_col_ indices we found.
-        int max_cols = std::max(8, std::max(frag1_col_, frag2_col_) + 1);
+        int max_optional_col = std::max(
+            std::max(frag1_col_, frag2_col_),
+            std::max(mapq1_col_, mapq2_col_));
+        int max_cols = std::max(8, max_optional_col + 1);
         // Cap for safety
         if (max_cols > 32) max_cols = 32;
 
@@ -346,15 +358,105 @@ private:
 
         // frag1/frag2: use #columns-specified positions if available, else 0/1
         // (Java: "set frag1=0 and frag2=1 so that no reads are discarded")
-        out.frag1 = (frag1_col_ >= 0 && frag1_col_ < (int)f.size())
-                    ? std::atoi(f[frag1_col_].c_str()) : 0;
-        out.frag2 = (frag2_col_ >= 0 && frag2_col_ < (int)f.size())
-                    ? std::atoi(f[frag2_col_].c_str()) : 1;
+        bool has_fragments = frag1_col_ >= 0 && frag2_col_ >= 0
+                          && frag1_col_ < (int)f.size() && frag2_col_ < (int)f.size();
+        out.frag1 = has_fragments ? std::atoi(f[frag1_col_].c_str()) : 0;
+        out.frag2 = has_fragments ? std::atoi(f[frag2_col_].c_str()) : 1;
 
-        out.mapq1 = out.mapq2 = 255;
+        // Match Java: MAPQ filtering is enabled only when both columns exist.
+        bool has_mapqs = mapq1_col_ >= 0 && mapq2_col_ >= 0
+                      && mapq1_col_ < (int)f.size() && mapq2_col_ < (int)f.size();
+        out.mapq1 = has_mapqs ? std::atoi(f[mapq1_col_].c_str()) : 1000;
+        out.mapq2 = has_mapqs ? std::atoi(f[mapq2_col_].c_str()) : 1000;
         out.score = 1.0f;
         return true;
     }
+};
+
+// ============================================================
+//  Juicer binary pair formats
+// ============================================================
+
+class BinaryPairIterator : public PairIterator {
+public:
+    BinaryPairIterator(const std::string& path, const Genome& genome, bool short_format)
+        : genome_(genome), short_format_(short_format), path_(path) {
+        file_ = fopen(path.c_str(), "rb");
+        if (!file_) throw std::runtime_error("Cannot open binary pair file: " + path);
+    }
+
+    ~BinaryPairIterator() override { close(); }
+
+    void close() override {
+        if (file_) {
+            fclose(file_);
+            file_ = nullptr;
+        }
+    }
+
+    bool next(AlignmentPair& out) override {
+        const size_t record_size = short_format_ ? 20 : 26;
+        uint8_t record[26];
+        size_t n = fread(record, 1, record_size, file_);
+        if (n == 0) {
+            if (ferror(file_)) throw std::runtime_error("Error reading binary pair file: " + path_);
+            return false;
+        }
+        if (n != record_size) {
+            throw std::runtime_error("Truncated binary pair record in: " + path_);
+        }
+
+        auto get_i32 = [](const uint8_t* p) {
+            uint32_t bits = static_cast<uint32_t>(p[0])
+                          | (static_cast<uint32_t>(p[1]) << 8)
+                          | (static_cast<uint32_t>(p[2]) << 16)
+                          | (static_cast<uint32_t>(p[3]) << 24);
+            return static_cast<int32_t>(bits);
+        };
+
+        if (short_format_) {
+            out.chr1 = get_i32(record);
+            out.pos1 = get_i32(record + 4);
+            out.chr2 = get_i32(record + 8);
+            out.pos2 = get_i32(record + 12);
+            uint32_t score_bits = static_cast<uint32_t>(record[16])
+                                | (static_cast<uint32_t>(record[17]) << 8)
+                                | (static_cast<uint32_t>(record[18]) << 16)
+                                | (static_cast<uint32_t>(record[19]) << 24);
+            std::memcpy(&out.score, &score_bits, sizeof(out.score));
+            out.strand1 = 0;
+            out.strand2 = 1;
+            out.frag1 = 0;
+            out.frag2 = 1;
+        } else {
+            // Java stores true for forward strand; C++ stores 0 for forward.
+            out.strand1 = record[0] ? 0 : 1;
+            out.chr1 = get_i32(record + 1);
+            out.pos1 = get_i32(record + 5);
+            out.frag1 = get_i32(record + 9);
+            out.strand2 = record[13] ? 0 : 1;
+            out.chr2 = get_i32(record + 14);
+            out.pos2 = get_i32(record + 18);
+            out.frag2 = get_i32(record + 22);
+            out.score = 1.0f;
+        }
+        out.mapq1 = out.mapq2 = 1000;
+
+        // Binary chromosome IDs are 1-based indices into the supplied genome,
+        // exactly as in Java's BinPairIterator.
+        if (out.chr1 <= 0 || out.chr1 >= genome_.size()
+                || out.chr2 <= 0 || out.chr2 >= genome_.size()) {
+            throw std::runtime_error(
+                "Binary pair chromosome index is incompatible with the supplied genome: " + path_);
+        }
+        return true;
+    }
+
+private:
+    const Genome& genome_;
+    bool short_format_;
+    std::string path_;
+    FILE* file_ = nullptr;
 };
 
 // ============================================================
@@ -375,6 +477,10 @@ std::unique_ptr<PairIterator> open_pair_iterator(
             return std::make_unique<ShortIterator>(path, genome);
         case InputFormat::PAIRS:
             return std::make_unique<PairsIterator>(path, genome);
+        case InputFormat::BIN:
+            return std::make_unique<BinaryPairIterator>(path, genome, false);
+        case InputFormat::BN:
+            return std::make_unique<BinaryPairIterator>(path, genome, true);
         default:
             throw std::runtime_error("Unknown input format");
     }

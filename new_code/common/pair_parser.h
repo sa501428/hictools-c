@@ -1,8 +1,9 @@
 #pragma once
-// Input contact-pair parsers for three formats:
+// Input contact-pair parsers:
 //   1. .mnd / merged_nodups (Juicer standard)
 //   2. Short format: chr1 pos1 chr2 pos2
 //   3. 4DN .pairs format (with ## header section)
+//   4. Juicer .bin and .bn little-endian binary formats
 //
 // All parsers emit AlignmentPair records.  The caller decides what to do with
 // contacts that don't pass MAPQ or chr-filter criteria.
@@ -22,8 +23,9 @@ struct AlignmentPair {
     int8_t  strand2 = 0;
     int32_t frag1  = 0;
     int32_t frag2  = 0;
-    int32_t mapq1  = 255;
-    int32_t mapq2  = 255;
+    // Java uses 1000 as the sentinel for formats that do not carry MAPQ.
+    int32_t mapq1  = 1000;
+    int32_t mapq2  = 1000;
     float   score  = 1.0f;
 
     bool valid() const { return chr1 >= 0 && chr2 >= 0; }
@@ -39,6 +41,8 @@ enum class InputFormat {
     MND,    // merged_nodups (Juicer): strand chr pos frag strand chr pos frag [mapq mapq score]
     SHORT,  // chr1 pos1 chr2 pos2
     PAIRS,  // 4DN .pairs: readID chr1 pos1 chr2 pos2 strand1 strand2 [...]
+    BIN,    // Juicer .bin: strands, chromosome indices, positions, fragments
+    BN,     // Juicer .bn: chromosome indices, positions, score
     AUTO,   // detect from content
 };
 

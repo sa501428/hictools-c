@@ -1,0 +1,4 @@
+## pairs format v1.0
+#columns: readID chr1 pos1 chr2 pos2 strand1 strand2 pair_type mapq1 mapq2 frag1 frag2
+pass chr1 100000 chr1 200000 + - UU 40 40 0 1
+fail chr1 300000 chr1 400000 + - UU 40 10 2 3

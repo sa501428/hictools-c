@@ -17,6 +17,11 @@ public:
     // with length = sum of all chromosome lengths / 1000 (Juicer stores All in kb).
     static Genome from_chrom_sizes(const std::string& path);
 
+    // Load either a chrom.sizes path or a built-in cleaned assembly.
+    // Built-ins currently include hg19, hg38, mm9, and mm10.
+    static Genome from_spec(const std::string& path_or_id);
+    static bool is_builtin(const std::string& id);
+
     // Convenience: build from an explicit list (name, length) — used in tests.
     static Genome from_list(const std::vector<std::pair<std::string,int64_t>>& chroms);
 

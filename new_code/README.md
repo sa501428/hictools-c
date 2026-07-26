@@ -66,7 +66,7 @@ Converts a contact pairs file to a HiC V9 `.hic` file.
 ### Usage
 
 ```
-hic_pre [options] <input_pairs> <output.hic> <chrom.sizes>
+hic_pre [options] <input_pairs> <output.hic> <chrom.sizes|genome-id>
 ```
 
 ### Options
@@ -74,11 +74,11 @@ hic_pre [options] <input_pairs> <output.hic> <chrom.sizes>
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-r <res,...>` | `2500000,1000000,500000,250000,100000,50000,25000,10000,5000,1000` | Comma-separated BP resolutions |
-| `-q <mapq>` | `0` | Minimum MAPQ score; reads below threshold are discarded |
+| `-q <mapq>` | `0` | Minimum MAPQ score; a pair is discarded when either available MAPQ is below the threshold |
 | `-t <threads>` | `4` | Worker threads |
 | `-T <tmpdir>` | `/tmp` | Directory for temporary files |
 | `-g <genome>` | _(empty)_ | Genome ID written to file header (e.g. `hg38`) |
-| `-f <format>` | `auto` | Input format: `auto`, `mnd`, `short`, `pairs` |
+| `-f <format>` | `auto` | Input format: `auto`, `mnd`, `short`, `pairs`, `bin`, or `bn` |
 | `-d <depth>` | `2` | V9 block depth base (1–10) |
 | `--intra` | off | Discard inter-chromosomal contacts |
 | `--near-diag` | off | Discard contacts > 10 Mb from diagonal |
@@ -92,12 +92,19 @@ chr2    242193529
 chrX    156040895
 ```
 UCSC chrom.sizes files work directly. `chrM` and other contigs can be included or
-omitted as needed.
+omitted as needed. Instead of a file, the final argument may be one of the built-in
+cleaned assemblies: `hg19`, `hg38`, `mm9`, or `mm10`. Built-in assemblies contain
+only the standard autosomes, sex chromosomes, and mitochondrial chromosome, in
+the same order and at the same lengths as the corresponding Java hic-tools
+resources. The built-in ID is also written to the `.hic` header unless `-g`
+overrides it.
 
 ### Input formats
 
-Format is auto-detected from extension (`.pairs`, `.mnd`) or file content. All
-formats support `.gz` compression (decompressed via `gzip -dc`).
+Format is auto-detected from extension (`.pairs`, `.mnd`, `.bin`, `.bn`) or, for
+ambiguous text files, from file content. Text formats support `.gz` compression
+(decompressed via `gzip -dc`). Binary `.bin` and `.bn` files are uncompressed
+little-endian Juicer formats.
 
 | Format | Fields | Description |
 |--------|--------|-------------|
@@ -109,7 +116,21 @@ formats support `.gz` compression (decompressed via `gzip -dc`).
 | New MND | `…frag2 mapq1 mapq2 score` | Short + MAPQ + score |
 | Medium | `readname str1 chr1 pos1 frag1 str2 chr2 pos2 frag2 mapq1 mapq2` | Medium format with read name |
 | Long (Juicer) | `str1 chr1 pos1 frag1 str2 chr2 pos2 frag2 mapq1 cigar1 seq1 mapq2 …` | Full merged_nodups format |
-| 4DN pairs | `readID chr1 pos1 chr2 pos2 strand1 strand2 [frag1 frag2 …]` | 4DN DCIC .pairs format |
+| 4DN/DCIC pairs | `readID chr1 pos1 chr2 pos2 strand1 strand2 […]` | `.pairs`; optional `frag1`/`frag2` and `mapq1`/`mapq2` pairs are located from `#columns:` and may appear in any order |
+| Juicer binary | `.bin` fixed 26-byte records | Strand, chromosome index, position, and fragment for both ends |
+| Juicer short binary | `.bn` fixed 20-byte records | Chromosome index and position for both ends, plus a floating-point score |
+
+The accepted text layouts therefore match Java hic-tools: extra-short (4 or 5
+fields), short (8 or 9), old short with adjacent MAPQs (10), medium (11 with a
+read name), new short with MAPQs and score (11), long (16), and header-described
+4DN/DCIC `.pairs`. `.mnd` is an extension hint for the non-DCIC text formats;
+plain `.txt` input is detected from its first data line.
+
+`-q` filters formats that carry MAPQ (`.pairs` with both MAPQ columns, old/new
+short MND, medium, and long). As in Java, formats without MAPQ—including
+extra-short, ordinary short, `.bin`, and `.bn`—use the sentinel value `1000`, so
+normal MAPQ thresholds do not discard them. Binary chromosome fields are numeric
+indices and must use the same chromosome ordering as the supplied genome.
 
 > **Note:** For formats that include a fragment field (`frag1`/`frag2`), contacts
 > where both reads map to the same fragment are discarded. If using dummy fragment

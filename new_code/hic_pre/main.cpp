@@ -1,13 +1,13 @@
 // hic_pre: Convert aligned read pairs to HiC V9 format.
 //
 // Usage:
-//   hic_pre [options] <input_pairs> <output.hic> <chrom.sizes>
+//   hic_pre [options] <input_pairs> <output.hic> <chrom.sizes|genome-id>
 //
 // Input formats auto-detected from extension / header:
 //   .mnd / merged_nodups   (Juicer format)
 //   .pairs                 (4DN format)
 //   short format           (chr1 pos1 chr2 pos2)
-//   All formats support .gz compression.
+//   Text formats support .gz compression.
 //
 // Options:
 //   -r <resolutions>  Comma-separated BP resolutions (default: 2500000,...,1000)
@@ -30,7 +30,7 @@
 
 static void usage(const char* prog) {
     fprintf(stderr,
-        "Usage: %s [options] <input_pairs> <output.hic> <chrom.sizes>\n"
+        "Usage: %s [options] <input_pairs> <output.hic> <chrom.sizes|genome-id>\n"
         "\n"
         "Options:\n"
         "  -r <res,...>   Comma-separated BP resolutions\n"
@@ -42,7 +42,8 @@ static void usage(const char* prog) {
         "  --intra        Only keep intra-chromosomal contacts\n"
         "  --near-diag    Only keep contacts within 10 Mb of diagonal\n"
         "  -d <depth>     V9 block depth base (default 2, range 1-10)\n"
-        "  -f <format>    Input format: auto|mnd|short|pairs (default auto)\n"
+        "  -f <format>    Input format: auto|mnd|short|pairs|bin|bn (default auto)\n"
+        "                 Built-in genome IDs: hg19, hg38, mm9, mm10\n"
         "  -h             Show this help\n",
         prog);
 }
@@ -84,7 +85,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (argc - i < 3) {
-        fprintf(stderr, "Error: need <input_pairs> <output.hic> <chrom.sizes>\n");
+        fprintf(stderr, "Error: need <input_pairs> <output.hic> <chrom.sizes|genome-id>\n");
         usage(argv[0]);
         return 1;
     }
@@ -97,17 +98,24 @@ int main(int argc, char* argv[]) {
     if      (fmt_str == "mnd")   opts.input_format = InputFormat::MND;
     else if (fmt_str == "short") opts.input_format = InputFormat::SHORT;
     else if (fmt_str == "pairs") opts.input_format = InputFormat::PAIRS;
-    else                          opts.input_format = InputFormat::AUTO;
+    else if (fmt_str == "bin")   opts.input_format = InputFormat::BIN;
+    else if (fmt_str == "bn")    opts.input_format = InputFormat::BN;
+    else if (fmt_str == "auto")  opts.input_format = InputFormat::AUTO;
+    else {
+        fprintf(stderr, "Error: unknown input format '%s'\n", fmt_str.c_str());
+        return 1;
+    }
 
     // Genome ID attribute
+    if (genome_id.empty() && Genome::is_builtin(chrom_sizes)) genome_id = chrom_sizes;
     if (!genome_id.empty()) opts.attributes["genomeID"] = genome_id;
 
     // Load genome
     Genome genome;
     try {
-        genome = Genome::from_chrom_sizes(chrom_sizes);
+        genome = Genome::from_spec(chrom_sizes);
     } catch (std::exception& e) {
-        fprintf(stderr, "Error loading chrom.sizes: %s\n", e.what());
+        fprintf(stderr, "Error loading genome: %s\n", e.what());
         return 1;
     }
 
