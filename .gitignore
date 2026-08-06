@@ -12,3 +12,5 @@ test.txt.gz
 /new_code/full-validation-results
 /new_code/scale-validation-results
 /new_code/scale-rescue-validation-results
+*.zip
+.DS_Store
