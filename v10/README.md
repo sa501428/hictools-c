@@ -147,6 +147,9 @@ BYTE_SHUFFLE, and XOR32 vector transforms. Page bytes are contiguous within each
 matrix resolution. Defaults are 256-bin blocks, a 128 KiB **uncompressed** page
 target, Zstandard level 3, and 65,536 values per vector chunk. The uncompressed
 page target bounds working memory; a single large logical block may exceed it.
+The 256-bin block scale is a minimum: it is increased automatically for very
+fine or very large matrices so that every logical block number fits the V10
+`u32` field. For example, hg38 chr1 uses 380-bin blocks at 10 bp.
 The V10 reader also supports rotated cis grids written by other producers.
 
 Output is staged beside its destination, backpatched, flushed, and renamed only

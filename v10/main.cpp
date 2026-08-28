@@ -10,7 +10,7 @@ static void usage() {
            "  hic_v10 convert [options] <input.v9.hic> <output.v10.hic>\n\n"
            "Common options:\n"
            "  --level N          Zstandard compression level (default 3)\n"
-           "  --block-bins N     Rectangular block width (default 256; max 4096)\n"
+        "  --block-bins N     Minimum rectangular block width (default 256; max 4096)\n"
            "  --page-bytes N     Target uncompressed page bytes (default 131072)\n"
            "  --derive T:S       Derive target BP resolution T from source S; repeatable\n"
            "                     Both must exist; exact equivalence is verified\n"

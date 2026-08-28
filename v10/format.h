@@ -1,5 +1,6 @@
 #pragma once
 // Internal V10 writer model. No dependency on straw or the V9 writer.
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -24,6 +25,26 @@ inline uint64_t plus(uint64_t a, uint64_t b) {
 inline uint32_t narrow(uint64_t x) {
     check(x <= UINT32_MAX, "uint32 overflow");
     return static_cast<uint32_t>(x);
+}
+inline uint64_t ceil_div(uint64_t value, uint64_t divisor) {
+    check(divisor != 0, "division by zero");
+    return value / divisor + (value % divisor != 0);
+}
+// V10 block numbers are u32. A fixed block scale can overflow at very fine
+// resolutions: hg38 chr1 has about 24.9 million bins at 10 bp, which produces
+// more than 2^32 positions with 256-bin blocks. Keep the requested scale as a
+// minimum, but enlarge it until each grid axis has at most 65,536 blocks.
+inline uint32_t safe_block_bin_count(uint64_t column_bins, uint64_t row_bins, uint32_t requested) {
+    check(requested != 0 && column_bins != 0 && row_bins != 0, "invalid block geometry");
+    constexpr uint64_t MAX_BLOCKS_PER_AXIS = uint64_t{1} << 16;
+    uint64_t block_bins =
+        std::max<uint64_t>(requested, std::max(ceil_div(column_bins, MAX_BLOCKS_PER_AXIS),
+                                               ceil_div(row_bins, MAX_BLOCKS_PER_AXIS)));
+    uint64_t columns = ceil_div(column_bins, block_bins);
+    uint64_t rows = ceil_div(row_bins, block_bins);
+    check(columns * rows <= uint64_t{UINT32_MAX} + 1,
+          "matrix grid cannot be represented by u32 block numbers");
+    return narrow(block_bins);
 }
 inline uint32_t bits(float x) {
     uint32_t b;

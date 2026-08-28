@@ -322,8 +322,10 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
                 else
                     countSum = plus(countSum, c.value);
             }
-            uint32_t columns =
-                narrow((header_.bins(a, u, ri) + options_.blockBins - 1) / options_.blockBins);
+            uint64_t columnBins = header_.bins(a, u, ri);
+            uint64_t rowBins = header_.bins(b, u, ri);
+            uint32_t blockBins = safe_block_bin_count(columnBins, rowBins, options_.blockBins);
+            uint32_t columns = narrow(ceil_div(columnBins, blockBins));
             struct Page {
                 uint32_t first, last, raw;
                 uint64_t pos, len;
@@ -333,8 +335,7 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
             if (!r.mode && !m.cells.empty()) {
                 std::map<uint32_t, std::vector<Cell>> blocks;
                 for (auto c : m.cells) {
-                    uint32_t number = narrow(uint64_t(c.y / options_.blockBins) * columns +
-                                             c.x / options_.blockBins);
+                    uint32_t number = narrow(uint64_t(c.y / blockBins) * columns + c.x / blockBins);
                     blocks[number].push_back(c);
                 }
                 blockCount = blocks.size();
@@ -423,7 +424,7 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
             put(desc, occupied, 8);
             put(desc, 0x7fc00000, 4);
             put(desc, 0x7fc00000, 4);
-            put(desc, options_.blockBins, 4);
+            put(desc, blockBins, 4);
             put(desc, columns, 4);
             put(desc, indexPos, 8);
             put(desc, indexLen, 8);
