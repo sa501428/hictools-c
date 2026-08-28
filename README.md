@@ -3,6 +3,21 @@
 C++ implementation of the HiC pre-processing pipeline. Converts aligned read pairs to
 V9 `.hic` files (`hic_pre`) and computes normalization vectors in-place (`hic_addnorm`).
 
+## V10 support
+
+The default build and `hic_pre` output remain **V9**. A separate implementation
+under [`v10/`](v10/README.md) provides direct V10 preprocessing and V9 conversion:
+
+```sh
+cmake -S . -B build -DBUILD_V10=ON
+cmake --build build -j4
+build/hic_v10 pre input.pairs output.v10.hic hg38
+build/hic_v10 convert input.v9.hic output.v10.hic
+```
+
+See the [V10 documentation](v10/README.md) for derived resolutions, normalization
+preservation, memory behavior, and legacy vector length migration.
+
 ## Requirements
 
 | Dependency | Notes |
@@ -11,7 +26,7 @@ V9 `.hic` files (`hic_pre`) and computes normalization vectors in-place (`hic_ad
 | CMake ≥ 3.13 | |
 | zlib | Required for block compression |
 | pthreads | Required for parallelism |
-| zstd | Optional — reserved for future V10 support |
+| zstd | Required only for the opt-in `hic_v10` executable (`-DBUILD_V10=ON`) |
 
 On macOS with Homebrew:
 ```

@@ -17,14 +17,8 @@ set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fsanitize=address")
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
 
-# Optional: zstd (for future V10 support)
-find_library(ZSTD_LIB zstd)
-if(ZSTD_LIB)
-  message(STATUS "zstd found: ${ZSTD_LIB}")
-  add_compile_definitions(HAVE_ZSTD)
-else()
-  message(STATUS "zstd not found - skipping V10 support")
-endif()
+# V10 is opt-in; the default build and existing commands remain V9-only.
+option(BUILD_V10 "Build the separate V10 pre/conversion executable" OFF)
 
 # Common sources shared between both executables
 set(COMMON_SOURCES
@@ -54,9 +48,6 @@ add_executable(hic_pre
 )
 target_include_directories(hic_pre PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(hic_pre PRIVATE ZLIB::ZLIB Threads::Threads)
-if(ZSTD_LIB)
-  target_link_libraries(hic_pre PRIVATE ${ZSTD_LIB})
-endif()
 
 # ---- hic_addnorm executable ----
 add_executable(hic_addnorm
@@ -67,9 +58,6 @@ add_executable(hic_addnorm
 )
 target_include_directories(hic_addnorm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(hic_addnorm PRIVATE ZLIB::ZLIB Threads::Threads)
-if(ZSTD_LIB)
-  target_link_libraries(hic_addnorm PRIVATE ${ZSTD_LIB})
-endif()
 
 # Math library (needed for log2 in SCALE norm)
 target_link_libraries(hic_pre PRIVATE m)
@@ -113,3 +101,7 @@ endif()
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "CXX flags: ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}}")
+
+if(BUILD_V10)
+  add_subdirectory(v10)
+endif()
