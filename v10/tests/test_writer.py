@@ -53,6 +53,43 @@ def main():
         weights = p/'weights.txt'; weights.write_text('chr1 100 chr1 250 16777216\nchr1 100 chr1 250 1\n')
         run([v10, 'pre', '-r', '100', weights, p/'counts.hic', chrom])
         assert Hic(p/'counts.hic').records(0, 0, 100) == [(1, 2, 16777217)]
+        # Independent HBS fixture: uint16 IDs, bins, escaped exact uint64 counts.
+        hbs = p/'counts.hbs.gz'
+        def hbs_bytes(records):
+            data = b'HICBS\0\r\n' + struct.pack('<HHII', 1, 0, 100, 2)
+            for name, length in [(b'chr2', 7500), (b'chr1', 10000)]:
+                data += struct.pack('<H', len(name)) + name + struct.pack('<Q', length)
+            for a, x, b, y, count in records:
+                data += struct.pack('<HIHIH', a, x, b, y, min(count, 65535))
+                if count >= 65535: data += struct.pack('<Q', count)
+            return data
+        records = [(1, 1, 1, 2, (1 << 53)+1), (1, 1, 1, 2, 1),
+                   (1, 3, 1, 4, 65534), (1, 5, 1, 6, 65535),
+                   (1, 0, 0, 1, 2)]
+        hbs.write_bytes(gzip.compress(hbs_bytes(records)))
+        run([v10, 'pre', '-r', '100,200', hbs, p/'hbs.hic', chrom])
+        assert Hic(p/'hbs.hic').records(0, 0, 100) == [(1, 2, (1<<53)+2), (3, 4, 65534), (5, 6, 65535)]
+        assert Hic(p/'hbs.hic').records(0, 1, 100) == [(0, 1, 2)]
+        run([v9, '-r', '100,200', hbs, p/'hbs.v9.hic', chrom])
+        run([v10, 'convert', p/'hbs.v9.hic', p/'hbs-converted.hic'])
+        assert Hic(p/'hbs-converted.hic').records(1, 1, 100) == [(1, 2, 1<<53), (3, 4, 65534), (5, 6, 65535)]
+        # Explicit score storage remains a requested, lossy conversion.
+        run([v10, 'pre', '--scores', '-f', 'hbs', '-r', '100', hbs, p/'hbs-score.hic', chrom])
+        assert Hic(p/'hbs-score.hic').records(0, 0, 100)[0][2] == struct.unpack('<I', struct.pack('<f', (1<<53)+2))[0]
+        for cmd in [[v9], [v10, 'pre']]:
+            run(cmd + ['-r', '50', hbs, p/'bad.hic', chrom], ok=False)
+            run(cmd + ['-r', '150', hbs, p/'bad.hic', chrom], ok=False)
+        hbs.write_bytes(gzip.compress(hbs_bytes([(1, 1, 1, 2, (1<<64)-1)])))
+        run([v10, 'pre', '-r', '100', hbs, p/'hbs-max.hic', chrom])
+        assert Hic(p/'hbs-max.hic').records(0, 0, 100) == [(1, 2, (1<<64)-1)]
+        original_hbs_output = (p/'hbs-max.hic').read_bytes()
+        hbs.write_bytes(gzip.compress(hbs_bytes([(1, 1, 1, 2, (1<<64)-1), (1, 1, 1, 2, 1)])))
+        run([v10, 'pre', '-r', '100', hbs, p/'hbs-max.hic', chrom], ok=False)
+        assert (p/'hbs-max.hic').read_bytes() == original_hbs_output
+        hbs.write_bytes(gzip.compress(hbs_bytes(records))[:-4])
+        for cmd in [[v9], [v10, 'pre']]:
+            run(cmd + ['-r', '100', hbs, p/'hbs-max.hic', chrom], ok=False)
+            assert (p/'hbs-max.hic').read_bytes() == original_hbs_output
         weights.write_text('chr1 100 chr1 250 -0.0\nchr1 300 chr1 450 1.25\n')
         run([v10, 'pre', '-r', '100', weights, p/'scores.hic', chrom])
         assert Hic(p/'scores.hic').records(0, 0, 100) == [(1, 2, 0x80000000), (3, 4, 0x3fa00000)]

@@ -38,11 +38,11 @@ struct Spool {
                   fseeko(file, 0, SEEK_SET) == 0,
               "cannot reset pair spool");
     }
-    void add(uint32_t x, uint32_t y, float score) {
+    void add(uint32_t x, uint32_t y, const AlignmentPair& pair) {
         Bytes b;
         put(b, x, 4);
         put(b, y, 4);
-        put(b, bits(score), 4);
+        put(b, pair.has_exact_count ? pair.exact_count : bits(pair.score), pair.has_exact_count ? 8 : 4);
         check(std::fwrite(b.data(), 1, b.size(), file) == b.size(), "cannot write pair spool");
     }
 };
@@ -77,11 +77,15 @@ void pre(const std::string &input, const std::string &output, const std::string 
     Writer writer(output, h, options);
     Spool spool(p.tmpDir);
     auto iterator = open_pair_iterator(input, genome, p.format);
+    if (auto source = iterator->source_resolution())
+        for (auto r : resolutions)
+            check(r % source == 0, "HBS output resolutions must be multiples of the source resolution");
     AlignmentPair pair;
     std::pair<int32_t, int32_t> active{-1, -1};
     std::set<std::pair<int32_t, int32_t>> seen;
     uint64_t records = 0, total = 0, kept = 0;
     bool scores = options.scores, expectedValid = true;
+    bool exactSpool = false;
     auto flush = [&]() {
         if (active.first < 0)
             return;
@@ -103,18 +107,28 @@ void pre(const std::string &input, const std::string &output, const std::string 
             for (uint64_t i = 0; i < records; ++i) {
                 uint32_t x = static_cast<uint32_t>(fread_int32(spool.file)),
                          y = static_cast<uint32_t>(fread_int32(spool.file));
-                float value = fread_float(spool.file);
+                uint64_t stored = 0;
+                const bool exact = exactSpool;
+                if (exact) {
+                    unsigned char bytes[8];
+                    check(std::fread(bytes, 1, 8, spool.file) == 8, "truncated count spool");
+                    for (unsigned j = 0; j < 8; ++j) stored |= uint64_t(bytes[j]) << (8 * j);
+                } else stored = bits(fread_float(spool.file));
+                uint32_t word = static_cast<uint32_t>(stored);
+                float value;
+                std::memcpy(&value, &word, sizeof(value));
+                if (exact) value = static_cast<float>(stored);
                 auto &a = cells[{y / bin, x / bin}];
                 if (scores) {
                     if (!a.n)
                         a.firstBits = bits(value);
-                    a.score += double(value);
+                    a.score += exact ? static_cast<double>(stored) : double(value);
                     ++a.n;
                 } else {
-                    check(std::isfinite(value) && value >= 0 && std::floor(value) == value &&
-                              double(value) < std::ldexp(1.0, 64),
+                    check(exact || (std::isfinite(value) && value >= 0 && std::floor(value) == value &&
+                              double(value) < std::ldexp(1.0, 64)),
                           "invalid count weight");
-                    a.count = plus(a.count, static_cast<uint64_t>(value));
+                    a.count = plus(a.count, exact ? stored : static_cast<uint64_t>(value));
                 }
             }
             Matrix m;
@@ -159,10 +173,12 @@ void pre(const std::string &input, const std::string &output, const std::string 
             active = key;
         }
         float value = pair.score;
-        if (!std::isfinite(value) || value < 0 || std::signbit(value) ||
-            std::floor(value) != value || double(value) >= std::ldexp(1.0, 64) || value == 0)
+        if (!records) exactSpool = pair.has_exact_count;
+        check(exactSpool == pair.has_exact_count, "mixed count/score encodings within input pair");
+        if (!pair.has_exact_count && (!std::isfinite(value) || value < 0 || std::signbit(value) ||
+            std::floor(value) != value || double(value) >= std::ldexp(1.0, 64) || value == 0))
             scores = true;
-        spool.add(pair.pos1, pair.pos2, value);
+        spool.add(pair.pos1, pair.pos2, pair);
         ++records;
         ++kept;
         if (!std::isfinite(value) || value < 0)
@@ -170,7 +186,7 @@ void pre(const std::string &input, const std::string &output, const std::string 
         if (pair.chr1 == pair.chr2 && std::isfinite(value) && value > 0)
             for (size_t i = 0; i < resolutions.size(); ++i)
                 ev[i]->add_distance(pair.chr1, pair.pos1 / resolutions[i],
-                                    pair.pos2 / resolutions[i], value);
+                                    pair.pos2 / resolutions[i], pair.has_exact_count ? static_cast<double>(pair.exact_count) : value);
     }
     iterator->close();
     flush();

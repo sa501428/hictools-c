@@ -93,7 +93,7 @@ hic_pre [options] <input_pairs> <output.hic> <chrom.sizes|genome-id>
 | `-t <threads>` | `4` | Worker threads |
 | `-T <tmpdir>` | `/tmp` | Directory for temporary files |
 | `-g <genome>` | _(empty)_ | Genome ID written to file header (e.g. `hg38`) |
-| `-f <format>` | `auto` | Input format: `auto`, `mnd`, `short`, `pairs`, `bin`, or `bn` |
+| `-f <format>` | `auto` | Input format: `auto`, `mnd`, `short`, `pairs`, `bin`, `bn`, or `hbs` |
 | `-d <depth>` | `2` | V9 block depth base (1–10) |
 | `--intra` | off | Discard inter-chromosomal contacts |
 | `--near-diag` | off | Discard contacts > 10 Mb from diagonal |
@@ -134,6 +134,34 @@ little-endian Juicer formats.
 | 4DN/DCIC pairs | `<readID> <chr1> <pos1> <chr2> <pos2> <strand1> <strand2> […]` | `.pairs`; optional `frag1`/`frag2` and `mapq1`/`mapq2` pairs are located from `#columns:` and may appear in any order |
 | Juicer binary | `.bin` fixed 26-byte records | Strand, chromosome index, position, and fragment for both ends |
 | Juicer short binary | `.bn` fixed 20-byte records | Chromosome index and position for both ends, plus a floating-point score |
+| Hi-C binary short | `.hbs.gz` compressed binary records | Header chromosome table and resolution; exact integer counts |
+
+### HBS compressed binary input
+
+Both `hic_pre` and `hic_v10 pre` read `.hbs.gz` exports from straw's `dump` or
+`subsample` commands. The suffix is auto-detected; `-f hbs` selects it explicitly.
+
+```sh
+build/hic_pre -r 1000,5000,10000 sampled.hbs.gz sampled.v9.hic chrom.sizes
+build/hic_v10 pre -r 1000,5000,10000 sampled.hbs.gz sampled.v10.hic chrom.sizes
+```
+
+HBS embeds chromosome names, lengths, and a BP resolution. Records use uint16
+chromosome IDs, uint32 bin indices, and uint16 counts, with a uint64 escape for
+counts of 65,535 or more: 14 or 22 bytes before gzip. The format is specified in
+[HBS_FORMAT.md](HBS_FORMAT.md). No text conversion or external decompression is
+needed. Gzip and record corruption are reported as errors.
+
+The supplied genome may use a different chromosome ordering, but all embedded
+names must resolve uniquely and lengths must match. Output resolutions must be
+multiples of the source resolution; current builders require reconstructed BP
+coordinates to fit signed int32. V9 converts counts to its existing float32
+weight path. V10 carries HBS counts as uint64 through parsing and temporary
+spooling, with overflow-checked aggregation (unless `--scores` is requested).
+HBS has no mapping qualities or fragment metadata; it uses the existing MAPQ
+sentinel of 1000 and dummy fragments 0/1.
+
+### Text input details
 
 The accepted text layouts therefore match Java hic-tools: extra-short (4 or 5
 fields), short (8 or 9), old short with adjacent MAPQs (10), medium (11 with a

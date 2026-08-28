@@ -18,7 +18,7 @@ static void usage() {
            "Pre options (same parsers and MAPQ filtering as hic_pre):\n"
            "  -r N,N,...         BP resolutions (default: existing V9 resolution set)\n"
            "  -q N               Minimum MAPQ (default 0)\n"
-           "  -f FORMAT          auto|pairs|short|mnd|bin|bn\n"
+           "  -f FORMAT          auto|pairs|short|mnd|bin|bn|hbs\n"
            "  -g GENOME          Genome ID stored in header\n"
            "  -T DIR             Pair-spool directory (default /tmp)\n"
            "  --intra            Retain cis contacts only\n"
@@ -95,7 +95,8 @@ int main(int argc, char **argv) {
                 const std::map<std::string, InputFormat> formats = {
                     {"auto", InputFormat::AUTO},   {"pairs", InputFormat::PAIRS},
                     {"short", InputFormat::SHORT}, {"mnd", InputFormat::MND},
-                    {"bin", InputFormat::BIN},     {"bn", InputFormat::BN}};
+                    {"bin", InputFormat::BIN},     {"bn", InputFormat::BN},
+                    {"hbs", InputFormat::HBS}};
                 hic10::check(formats.count(f), "unknown input format " + f);
                 pre.format = formats.at(f);
             } else {

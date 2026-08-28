@@ -257,6 +257,11 @@ bool Preprocessor::should_skip(int chr1, int chr2, int pos1, int pos2,
 
 void Preprocessor::distribute_pairs(const std::string& input_path) {
     auto iter = open_pair_iterator(input_path, genome_, opts_.input_format);
+    if (auto source = iter->source_resolution()) {
+        for (auto r : opts_.resolutions)
+            if (r <= 0 || static_cast<uint32_t>(r) % source)
+                throw std::runtime_error("HBS: output resolutions must be multiples of the source resolution");
+    }
     AlignmentPair pair;
     int64_t n_total = 0, n_skipped = 0;
 

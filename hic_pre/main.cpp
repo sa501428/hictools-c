@@ -42,7 +42,7 @@ static void usage(const char* prog) {
         "  --intra        Only keep intra-chromosomal contacts\n"
         "  --near-diag    Only keep contacts within 10 Mb of diagonal\n"
         "  -d <depth>     V9 block depth base (default 2, range 1-10)\n"
-        "  -f <format>    Input format: auto|mnd|short|pairs|bin|bn (default auto)\n"
+        "  -f <format>    Input format: auto|mnd|short|pairs|bin|bn|hbs (default auto)\n"
         "                 Built-in genome IDs: hg19, hg38, mm9, mm10\n"
         "  -h             Show this help\n",
         prog);
@@ -100,6 +100,7 @@ int main(int argc, char* argv[]) {
     else if (fmt_str == "pairs") opts.input_format = InputFormat::PAIRS;
     else if (fmt_str == "bin")   opts.input_format = InputFormat::BIN;
     else if (fmt_str == "bn")    opts.input_format = InputFormat::BN;
+    else if (fmt_str == "hbs")   opts.input_format = InputFormat::HBS;
     else if (fmt_str == "auto")  opts.input_format = InputFormat::AUTO;
     else {
         fprintf(stderr, "Error: unknown input format '%s'\n", fmt_str.c_str());

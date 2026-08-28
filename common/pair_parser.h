@@ -27,6 +27,9 @@ struct AlignmentPair {
     int32_t mapq1  = 1000;
     int32_t mapq2  = 1000;
     float   score  = 1.0f;
+    // HBS counts bypass float32 in V10. Legacy parsers continue using score.
+    bool has_exact_count = false;
+    uint64_t exact_count = 0;
 
     bool valid() const { return chr1 >= 0 && chr2 >= 0; }
     // Is this a contig-to-contig pair (filtered out by the java code)?
@@ -43,6 +46,7 @@ enum class InputFormat {
     PAIRS,  // 4DN .pairs: readID chr1 pos1 chr2 pos2 strand1 strand2 [...]
     BIN,    // Juicer .bin: strands, chromosome indices, positions, fragments
     BN,     // Juicer .bn: chromosome indices, positions, score
+    HBS,    // gzip-compressed Hi-C binary short with exact integer counts
     AUTO,   // detect from content
 };
 
@@ -52,6 +56,7 @@ public:
     virtual ~PairIterator() = default;
     virtual bool next(AlignmentPair& out) = 0;
     virtual void close() = 0;
+    virtual uint32_t source_resolution() const { return 0; }
 };
 
 // Factory: open the appropriate parser based on format (AUTO = detect from header/extension).

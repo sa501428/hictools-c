@@ -1,5 +1,6 @@
 #include "pair_parser.h"
 #include "little_endian.h"
+#include "hbs_reader.h"
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -50,6 +51,7 @@ static const char* next_field(const char* p, char* field, size_t max_len) {
 InputFormat detect_format(const std::string& path) {
     // Extension-based detection first
     std::string p = path;
+    if (ends_with(p, ".hbs.gz")) return InputFormat::HBS;
     if (ends_with(p, ".bin")) return InputFormat::BIN;
     if (ends_with(p, ".bn")) return InputFormat::BN;
     if (ends_with(p, ".gz")) p = p.substr(0, p.size() - 3);
@@ -108,6 +110,7 @@ public:
     }
 
     bool next(AlignmentPair& out) override {
+        out = AlignmentPair{};
         char line[4096];
         while (fgets(line, sizeof(line), file_)) {
             if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
@@ -216,6 +219,7 @@ public:
     }
 
     bool next(AlignmentPair& out) override {
+        out = AlignmentPair{};
         char line[4096];
         while (fgets(line, sizeof(line), file_)) {
             if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
@@ -302,6 +306,7 @@ public:
     }
 
     bool next(AlignmentPair& out) override {
+        out = AlignmentPair{};
         char line[4096];
         if (has_first_) {
             has_first_ = false;
@@ -395,6 +400,7 @@ public:
     }
 
     bool next(AlignmentPair& out) override {
+        out = AlignmentPair{};
         const size_t record_size = short_format_ ? 20 : 26;
         uint8_t record[26];
         size_t n = fread(record, 1, record_size, file_);
@@ -481,6 +487,8 @@ std::unique_ptr<PairIterator> open_pair_iterator(
             return std::make_unique<BinaryPairIterator>(path, genome, false);
         case InputFormat::BN:
             return std::make_unique<BinaryPairIterator>(path, genome, true);
+        case InputFormat::HBS:
+            return std::make_unique<HbsIterator>(path, genome);
         default:
             throw std::runtime_error("Unknown input format");
     }

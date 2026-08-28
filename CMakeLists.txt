@@ -96,6 +96,7 @@ if(BUILD_TESTING AND UNIX)
       common/pair_parser.cpp
   )
   target_include_directories(test_pair_formats PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(test_pair_formats PRIVATE ZLIB::ZLIB)
   add_test(NAME pair_formats_and_builtin_genomes COMMAND test_pair_formats)
 endif()
 

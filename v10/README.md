@@ -30,7 +30,7 @@ build/hic_v10 pre -f mnd -q 30 -r 1000,5000,10000 \
   merged_nodups.txt output.v10.hic chrom.sizes
 ```
 
-`pre` reuses the existing input parsers, including extra-short, Juicer short,
+`pre` reuses the existing input parsers, including HBS (`.hbs.gz`), extra-short, Juicer short,
 merged-nodups/medium/long, header-described DCIC pairs, gzip text, `.bin`, and
 `.bn`. The default BP resolution set is the same as V9. `-f short` selects the
 4/5-column extra-short parser; use auto detection or `-f mnd` for Juicer's
@@ -48,10 +48,21 @@ removed on success and failure.
 Positive integral weights use checked `uint64_t` accumulation, so repeated
 contacts do not lose precision above the float integer limit. Fractional,
 negative, zero, or nonfinite scores select `SCORE_FLOAT32` for that pair. Use
-`--scores` to force score storage. Scores are read as `f32` by the shared parser;
+`--scores` to force score storage. Non-HBS scores are read as `f32` by the shared parser;
 single-cell score bits are preserved, and repeated scores are added in input
 order in `f64`, then rounded once to `f32`. Nonfinite/negative input scores disable
 raw expected generation, rather than advertising an invalid distance curve.
+
+For HBS binary exports from straw, use:
+
+```sh
+build/hic_v10 pre -r 1000,5000,10000 sampled.hbs.gz output.v10.hic chrom.sizes
+```
+
+HBS input preserves exact uint64 counts, including single weights above 2^53,
+through the parser, spool, and checked cell aggregation. Its chromosome table is
+matched by name and length. Requested resolutions must be multiples of the
+embedded BP resolution. See [the HBS specification](../HBS_FORMAT.md).
 
 Direct V10 preprocessing writes real chromosomes only, without the legacy
 synthetic `ALL` overview. It generates raw expected vectors using the existing
