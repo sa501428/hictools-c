@@ -6,17 +6,21 @@ V9 `.hic` files (`hic_pre`) and computes normalization vectors in-place (`hic_ad
 ## V10 support
 
 The default build and `hic_pre` output remain **V9**. A separate implementation
-under [`v10/`](v10/README.md) provides direct V10 preprocessing and V9 conversion:
+under [`v10/`](v10/README.md) provides direct V10 preprocessing, V9 conversion,
+and a separate V10 normalization command:
 
 ```sh
 cmake -S . -B build -DBUILD_V10=ON
 cmake --build build -j4
 build/hic_v10 pre input.pairs output.v10.hic hg38
 build/hic_v10 convert input.v9.hic output.v10.hic
+build/hic_v10 addnorm -t 8 output.v10.hic
 ```
 
-See the [V10 documentation](v10/README.md) for derived resolutions, normalization
-preservation, memory behavior, and legacy vector length migration.
+`hic_v10 addnorm` computes VC, VC_SQRT, and SCALE at both materialized and
+derived resolutions and writes raw and normalized expected vectors. See the
+[V10 documentation](v10/README.md) for details, memory behavior, and legacy
+vector length migration.
 
 ## Requirements
 

@@ -5,11 +5,12 @@ if(NOT V10_ZSTD_INCLUDE_DIR OR NOT V10_ZSTD_LIBRARY)
   message(FATAL_ERROR "BUILD_V10 requires the zstd headers and library")
 endif()
 add_executable(hic_v10
-    main.cpp writer.cpp convert.cpp pre.cpp
+    main.cpp writer.cpp convert.cpp pre.cpp reader.cpp repack.cpp addnorm.cpp
+    ../hic_addnorm/scale_norm.cpp
     ../common/genome.cpp ../common/pair_parser.cpp ../common/expected_value.cpp
 )
 target_include_directories(hic_v10 PRIVATE ${PROJECT_SOURCE_DIR} ${V10_ZSTD_INCLUDE_DIR})
-target_link_libraries(hic_v10 PRIVATE ${V10_ZSTD_LIBRARY} ZLIB::ZLIB Threads::Threads)
+target_link_libraries(hic_v10 PRIVATE ${V10_ZSTD_LIBRARY} ZLIB::ZLIB Threads::Threads m)
 set_target_properties(hic_v10 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 install(TARGETS hic_v10 DESTINATION bin)
 

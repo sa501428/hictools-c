@@ -37,6 +37,9 @@ def main():
             out = p/(name+'.hic')
             run([v10, 'pre', '-r', '100,200', '-q', '30', '--derive', '200:100', path, out, chrom])
             h = Hic(out)
+            assert h.norms == []
+            assert h.vector_locs[0] == (0, 0) and h.vector_locs[2] == (0, 0)
+            assert h.vector_locs[1][0] and h.vector_locs[1][1]
             assert h.records(0, 0, 100) == expected100
             assert h.records(0, 0, 200) == [(0, 1, 2), (1, 2, 1), (49, 49, 1)]
             assert h.records(0, 1, 100) == [(1, 3, 1)]
@@ -45,6 +48,79 @@ def main():
             if straw:
                 assert '100\t200\t2' in run([straw, 'observed', 'NONE', out, 'chr1', 'chr1', 'BP', 100])
                 assert '300\t100\t1' in run([straw, 'observed', 'NONE', out, 'chr2', 'chr1', 'BP', 100])
+        # V10 addnorm computes vectors for both physical and derived resolutions.
+        # It also rebuilds raw expected and normalized expected indexes, without
+        # touching the matrix section. A second run replaces rather than grows it.
+        normalized = p/'input.pairs.hic'
+        before = Hic(normalized)
+        before_records = {res: before.records(0, 0, res) for res in (100, 200)}
+        run([v10, 'addnorm', '--no-scale', normalized])
+        normalized_size = normalized.stat().st_size
+        h = Hic(normalized)
+        assert h.norms == ['VC', 'VC_SQRT']
+        assert all(position and length for position, length in h.vector_locs)
+        def float_words(words):
+            return [struct.unpack('<f', struct.pack('<I', word))[0] for word in words]
+        def scaled_vc(records, bins):
+            vc = [0.0] * bins
+            for x, y, value in records:
+                vc[x] += value
+                if x != y: vc[y] += value
+            raw = normed = 0.0
+            for x, y, value in records:
+                if vc[x] <= 0 or vc[y] <= 0: continue
+                multiple = 1 if x == y else 2
+                raw += multiple * value
+                normed += multiple * value / (vc[x] * vc[y])
+            factor = math.sqrt(normed / raw)
+            return [value * factor for value in vc]
+        for res, bins in ((100, 100), (200, 50)):
+            assert h.records(0, 0, res) == before_records[res]
+            expected_vc = scaled_vc(before_records[res], bins)
+            actual_vc = float_words(h.vectors[0, 'VC', 0, 0, res][0])
+            assert len(actual_vc) == bins
+            for actual, expected in zip(actual_vc, expected_vc):
+                assert math.isclose(actual, expected, rel_tol=1e-6, abs_tol=1e-8)
+            assert len(h.vectors[0, 'VC_SQRT', 0, 0, res][0]) == bins
+            assert len(h.vectors[1, None, None, 0, res][0]) == bins
+            assert len(h.vectors[2, 'VC', None, 0, res][0]) == bins
+            assert len(h.vectors[2, 'VC_SQRT', None, 0, res][0]) == bins
+            assert len(h.vectors[1, None, None, 0, res][1]) == 2
+            assert len(h.vectors[2, 'VC', None, 0, res][1]) == 2
+        run([v10, 'addnorm', '--no-scale', normalized])
+        assert normalized.stat().st_size == normalized_size
+        Hic(normalized)
+        run([v10, 'addnorm', '--no-vc-sqrt', '--no-scale', normalized])
+        h = Hic(normalized)
+        assert h.norms == ['VC']
+        assert h.records(0, 0, 200) == before_records[200]
+        run([v10, 'addnorm', '--no-scale', normalized])
+        assert Hic(normalized).norms == ['VC', 'VC_SQRT']
+        raw_only = p/'raw-only.hic'
+        raw_only.write_bytes(normalized.read_bytes())
+        run([v10, 'addnorm', '--no-vc', '--no-vc-sqrt', '--no-scale', raw_only])
+        raw = Hic(raw_only)
+        assert raw.norms == []
+        assert raw.vector_locs[0] == (0, 0) and raw.vector_locs[2] == (0, 0)
+        assert raw.vector_locs[1][0] and raw.vector_locs[1][1]
+        if straw:
+            assert run([straw, 'observed', 'VC', normalized, 'chr1', 'chr1', 'BP', 200])
+            assert run([straw, 'expected', 'VC', normalized, 'chr1', 'chr1', 'BP', 200])
+            assert run([straw, 'oe', 'VC_SQRT', normalized, 'chr1', 'chr1', 'BP', 200])
+        scale_input = p/'scale.txt'
+        scale_input.write_text(''.join(
+            f'chr1 {i*100} chr1 {(i+d)*100}\n'
+            for i in range(50) for d in range(4)))
+        scale_hic = p/'scale.hic'
+        run([v10, 'pre', '-r', '100,200', '--derive', '200:100',
+             scale_input, scale_hic, chrom])
+        run([v10, 'addnorm', '--no-vc', '--no-vc-sqrt', '-t', '2', scale_hic])
+        h = Hic(scale_hic)
+        assert h.norms == ['SCALE']
+        for res, bins in ((100, 100), (200, 50)):
+            assert len(h.vectors[0, 'SCALE', 0, 0, res][0]) == bins
+            assert len(h.vectors[1, None, None, 0, res][0]) == bins
+            assert len(h.vectors[2, 'SCALE', None, 0, res][0]) == bins
         gz = p/'input.pairs.gz'
         with gzip.open(gz, 'wt') as f: f.write(layouts['input.pairs']+'\n')
         run([v10, 'pre', '-r', '100', gz, p/'gzip.hic', chrom])
@@ -145,6 +221,13 @@ def main():
                         assert fixture.records(0, 0, 10) == expected
                         assert fixture.records(0, 0, 1, unit=1) == expected
                         assert fixture.vectors[0, 'VC', 0, 0, 10][0] == words
+                        if x_int and y_int and not floating and dense:
+                            run([v10, 'addnorm', '--no-scale', target])
+                            fixture = Hic(target)
+                            assert fixture.vectors[0, 'VC', 0, 1, 1]
+                            assert fixture.vectors[0, 'VC_SQRT', 0, 1, 1]
+                            assert fixture.vectors[1, None, None, 1, 1]
+                            assert fixture.vectors[2, 'VC', None, 1, 1]
                         if straw:
                             assert len(run([straw, 'observed', 'NONE', target, 'chr1', 'chr1', 'FRAG', 1]).splitlines()) == 3
         # Many tiny pages force multiple checkpoint groups.
@@ -152,6 +235,10 @@ def main():
         many = p/'many.txt'; many.write_text(''.join(f'chr1 {i*20} chr1 {i*20+10}\n' for i in range(3000)))
         run([v10, 'pre', '-r', '10', '--block-bins', '1', '--page-bytes', '1024', many, p/'many.hic', bigchrom])
         many_hic = Hic(p/'many.hic')
+        assert len(many_hic.pages) > 64 and len(many_hic.records(0, 0, 10)) == 3000
+        run([v10, 'addnorm', '--no-scale', p/'many.hic'])
+        many_hic = Hic(p/'many.hic')
+        assert many_hic.norms == ['VC', 'VC_SQRT']
         assert len(many_hic.pages) > 64 and len(many_hic.records(0, 0, 10)) == 3000
         if straw:
             assert len(run([straw, 'observed', 'NONE', p/'many.hic', 'chr1:40000:40100', 'chr1:40000:40100', 'BP', 10]).splitlines()) == 5
@@ -171,5 +258,8 @@ def main():
         damaged = p/'damaged.hic'; damaged.write_bytes(original.read_bytes()[:-10])
         run([v10, 'convert', damaged, converted], ok=False)
         assert converted.read_bytes() == saved
-    print('V10 writer: independent decoding, formats, counts, scores, V9 norms, checkpoints, failure safety passed')
+        v9_saved = original.read_bytes()
+        run([v10, 'addnorm', original], ok=False)
+        assert original.read_bytes() == v9_saved
+    print('V10 writer/addnorm: matrices, derived norms, expected vectors, formats, counts, checkpoints, failure safety passed')
 if __name__ == '__main__': main()

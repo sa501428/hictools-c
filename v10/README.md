@@ -67,14 +67,34 @@ embedded BP resolution. See [the HBS specification](../HBS_FORMAT.md).
 Direct V10 preprocessing writes real chromosomes only, without the legacy
 synthetic `ALL` overview. It generates raw expected vectors using the existing
 expected-value calculation, extending unavailable terminal distances with NaNs.
-It does not compute normalization vectors. To obtain the existing normalization
-algorithms, normalize a V9 file and then convert it:
+It does not compute normalization vectors during preprocessing. Add them to the
+completed V10 file with the separate V10 implementation:
 
 ```sh
-build/hic_pre -r 1000,5000,10000 input.pairs intermediate.v9.hic hg38
-build/hic_addnorm intermediate.v9.hic
-build/hic_v10 convert intermediate.v9.hic output.v10.hic
+build/hic_v10 addnorm -t 8 output.v10.hic
 ```
+
+`hic_v10 addnorm` computes VC, VC_SQRT, and SCALE for every advertised BP and
+FRAG resolution. For a materialized resolution it reads that resolution's
+pages; for a derived resolution it deterministically aggregates its declared
+source in memory and normalizes the resulting cells. Raw expected (`EVI0`) is
+rebuilt for every resolution, and each enabled normalization gets a normalized
+expected (`NEVI`) vector with chromosome scale factors.
+
+The command uses the same normalization controls as the V9 tool:
+
+```sh
+build/hic_v10 addnorm --no-scale output.v10.hic
+build/hic_v10 addnorm -t 8 --tol 1e-4 --iter 2000 --min-res 25000 output.v10.hic
+```
+
+The update is atomic and in place: matrix bytes are copied unchanged, a fresh
+vector section is written, and the temporary file replaces the input only after
+it is flushed. Repeated runs replace the prior vector section without growing
+the file. `pre` leaves the normalization dictionary empty and the fixed NVI
+locator `(0, 0)`. When `addnorm` runs, it adds only the requested normalization
+names, expands the variable header, relocates the unchanged matrix section, and
+fills the NVI locator. This repack is staged in the same atomic temporary file.
 
 ## Convert an existing V9 file
 

@@ -18,7 +18,7 @@ find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
 
 # V10 is opt-in; the default build and existing commands remain V9-only.
-option(BUILD_V10 "Build the separate V10 pre/conversion executable" OFF)
+option(BUILD_V10 "Build the separate V10 pre/conversion/addnorm executable" OFF)
 
 # Common sources shared between both executables
 set(COMMON_SOURCES

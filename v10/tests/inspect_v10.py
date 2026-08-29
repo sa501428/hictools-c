@@ -78,6 +78,7 @@ class Hic:
         assert c.take(4) == b'HIC\0' and c.u32() == 10
         headerlen, footer, footerlen, nvi, nvil, evi, evil, nevi, nevil, flags = c.unpack('10Q')
         assert flags == 0
+        self.vector_locs = [(nvi, nvil), (evi, evil), (nevi, nevil)]
         self.genome = c.string()
         self.attributes = [(c.string(), c.string()) for _ in range(c.u32())]
         self.chroms = [(c.string(), c.u64()) for _ in range(c.u32())]
