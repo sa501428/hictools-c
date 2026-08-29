@@ -41,9 +41,10 @@ format requirements and do not need `--derive` flags.
 
 Each normalized chromosome pair must occupy one contiguous input block, as with
 `hic_pre`. Positions must be within `[0, chromosomeLength)` after parsing;
-coordinates are consumed using the existing parsers' conventions. The parser
-closes each pair spool in `-T` (default `/tmp`) and hands it to a bounded worker
-pool while it reads ahead into later chromosome pairs. Workers aggregate only
+coordinates are consumed using the existing parsers' conventions. Each run creates
+a private `hic-v10-run-*` workspace beneath `-T` (default `/tmp`). The parser closes
+each pair spool there and hands it to a bounded worker pool while it reads ahead
+into later chromosome pairs. Workers aggregate only
 materialized resolutions into compact, disk-backed matrix sections; mandatory
 derived targets are reconstructed from their source without their own input pass
 or temporary matrix. The ordered
@@ -53,8 +54,10 @@ explicit spool bound. The same `-t` worker pool performs Zstandard page
 compression, so the command does not create a second unbounded set of threads.
 Each active cell accumulator must fit in memory; it does not yet spill cells.
 Logical blocks reuse that accumulator's cell storage rather than copying all
-cells into per-block vectors. All pair and matrix spools are removed on success
-and failure.
+cells into per-block vectors. After all workers have joined, the private workspace
+and all pair and matrix spools are removed on success and on ordinary error exits.
+As with any process, an uncatchable termination such as `SIGKILL` can prevent
+in-process cleanup.
 
 Positive integral weights use checked `uint64_t` accumulation, so repeated
 contacts do not lose precision above the float integer limit. Fractional,

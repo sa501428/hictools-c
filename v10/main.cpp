@@ -25,7 +25,7 @@ static void usage() {
            "  -q N               Minimum MAPQ (default 0)\n"
            "  -f FORMAT          auto|pairs|short|mnd|bin|bn|hbs\n"
            "  -g GENOME          Genome ID stored in header\n"
-           "  -T DIR             Pair-spool directory (default /tmp)\n"
+           "  -T DIR             Run-scoped spool parent; automatically cleaned (default /tmp)\n"
            "  --read-ahead N     Maximum outstanding chromosome pairs (default: -t)\n"
            "  --intra            Retain cis contacts only\n"
            "  --near-diag        Discard cis contacts beyond 10 Mb\n"

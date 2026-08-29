@@ -282,6 +282,7 @@ def main():
         run([v10, 'pre', '-r', '100', unsorted, converted, chrom], ok=False)
         assert converted.read_bytes() == saved
         assert not list(p.glob('*.tmp.*'))
+        assert not list(p.glob('hic-v10-run-*'))
         damaged = p/'damaged.hic'; damaged.write_bytes(original.read_bytes()[:-10])
         run([v10, 'convert', damaged, converted], ok=False)
         assert converted.read_bytes() == saved

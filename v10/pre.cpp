@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <dirent.h>
 #include <future>
 #include <memory>
 #include <set>
@@ -13,6 +14,40 @@
 
 namespace hic10 {
 namespace {
+struct TempWorkspace {
+    std::string path;
+
+    explicit TempWorkspace(const std::string &directory) {
+        std::string pattern = directory + "/hic-v10-run-XXXXXX";
+        std::vector<char> name(pattern.begin(), pattern.end());
+        name.push_back(0);
+        check(mkdtemp(name.data()) != nullptr,
+              "cannot create V10 temporary workspace in " + directory);
+        path = name.data();
+    }
+
+    TempWorkspace(const TempWorkspace &) = delete;
+    TempWorkspace &operator=(const TempWorkspace &) = delete;
+
+    ~TempWorkspace() {
+        // This directory is private to this process and contains only flat spool
+        // files. Cleanup is deliberately non-throwing so it also runs while an
+        // earlier preprocessing exception is unwinding.
+        if (path.empty())
+            return;
+        if (DIR *directory = opendir(path.c_str())) {
+            while (dirent *entry = readdir(directory)) {
+                std::string name = entry->d_name;
+                if (name == "." || name == "..")
+                    continue;
+                std::remove((path + "/" + name).c_str());
+            }
+            closedir(directory);
+        }
+        rmdir(path.c_str());
+    }
+};
+
 struct Spool {
     FILE *file = nullptr;
     std::string path;
@@ -196,6 +231,10 @@ void pre(const std::string &input, const std::string &output, const std::string 
         ev.emplace_back(new ExpectedValueCalculation(genome, static_cast<int>(r)));
     }
     check(options.threads > 0 && options.threads <= 256, "invalid writer thread count");
+    // Declared before the worker pool so it is removed only after every queued
+    // preparation job has been joined and released during normal or exceptional
+    // stack unwinding.
+    TempWorkspace workspace(p.tmpDir);
     auto pool = std::make_shared<ThreadPool>(options.threads);
     Options writerOptions = options;
     // Direct preprocessing defines derived targets by exact source aggregation;
@@ -260,7 +299,7 @@ void pre(const std::string &input, const std::string &output, const std::string 
         job.exact = exactSpool;
         job.input = std::move(spool);
         pending.push_back(pool->submit(
-            [job = std::move(job), matrixResolutions, directory = p.tmpDir]() mutable {
+            [job = std::move(job), matrixResolutions, directory = workspace.path]() mutable {
                 return prepare_pair(std::move(job), matrixResolutions, directory);
             }));
         records = 0;
@@ -291,7 +330,7 @@ void pre(const std::string &input, const std::string &output, const std::string 
             submit();
             check(seen.insert(key).second, "chromosome pair is not contiguous in input");
             active = key;
-            spool = std::make_shared<Spool>(p.tmpDir);
+            spool = std::make_shared<Spool>(workspace.path);
         }
         float value = pair.score;
         if (!records) exactSpool = pair.has_exact_count;

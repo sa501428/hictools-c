@@ -97,7 +97,7 @@ hic_pre [options] <input_pairs> <output.hic> <chrom.sizes|genome-id>
 | `-r <res,...>` | `2500000,1000000,500000,250000,100000,50000,25000,10000,5000,1000` | Comma-separated BP resolutions |
 | `-q <mapq>` | `0` | Minimum MAPQ score; a pair is discarded when either available MAPQ is below the threshold |
 | `-t <threads>` | `4` | Worker threads |
-| `-T <tmpdir>` | `/tmp` | Directory for temporary files |
+| `-T <tmpdir>` | `/tmp` | Parent for a run-scoped temporary directory, automatically cleaned |
 | `-g <genome>` | _(empty)_ | Genome ID written to file header (e.g. `hg38`) |
 | `-f <format>` | `auto` | Input format: `auto`, `mnd`, `short`, `pairs`, `bin`, `bn`, or `hbs` |
 | `-d <depth>` | `2` | V9 block depth base (1–10) |
