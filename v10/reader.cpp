@@ -136,6 +136,8 @@ Reader::Reader(const std::string &path) {
                       "invalid derived V10 resolution source");
         }
     }
+    check(required_bp_resolution_policy(header_.resolutions[0]),
+          "V10 mandatory BP derivation policy is not satisfied");
     if (!header_.resolutions[1].empty())
         for (auto &chr : header_.chromosomes) {
             n = c.word();
@@ -316,8 +318,10 @@ const Reader::MatrixMeta &Reader::metadata(MatrixKey key) {
         const auto &r = header_.resolutions[expected_unit][expected_ri];
         check(z.unit == expected_unit && z.resolution == expected_ri && z.bin == r.bin &&
                   z.mode == r.mode && z.aggregation == r.aggregation && z.source == r.source &&
-                  z.type <= 1 && z.grid <= 1 && (!z.grid || key.chr1 == key.chr2) &&
-                  z.block_bins && z.columns,
+                  z.type <= 1 && z.grid == uint8_t(key.chr1 == key.chr2) &&
+                  z.block_bins &&
+                  z.columns == ceil_div(header_.bins(key.chr1, expected_unit, expected_ri),
+                                         z.block_bins),
               "V10 zoom mismatch");
         if (z.mode)
             check(!z.page_index.length && !z.pages && !z.blocks,
@@ -493,7 +497,10 @@ Matrix Reader::materialized(MatrixKey key, const Zoom &z) {
                              by = narrow(uint64_t(y) + local / w);
                     check(bx < header_.bins(key.chr1, z.unit, z.resolution) &&
                               by < header_.bins(key.chr2, z.unit, z.resolution) &&
-                              (key.chr1 != key.chr2 || bx <= by),
+                              (key.chr1 != key.chr2 || bx <= by) &&
+                              (z.grid ? rotated_block_number(bx, by, z.block_bins, z.columns)
+                                      : narrow(uint64_t(by / z.block_bins) * z.columns +
+                                               bx / z.block_bins)) == ref.number,
                           "V10 block cell outside matrix");
                     result.cells.push_back({bx, by, value});
                     ++emitted;

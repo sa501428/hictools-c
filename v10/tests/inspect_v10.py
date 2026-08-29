@@ -99,7 +99,10 @@ class Hic:
                 u, mode, agg, typ, ri, bin, source, grid, total, occupied, sd, pc, B, cols, ip, il, np, nb = c.unpack('4B3IB3xQQII2IQQ2I')
                 assert (bin, mode, agg, 0, source) == self.res[u][ri]
                 assert sd == pc == 0x7fc00000
-                matrix = {'type': typ, 'source': source, 'mode': mode, 'occupied': occupied, 'sum': total, 'records': []}
+                assert grid == int(a == b)
+                matrix = {'type': typ, 'source': source, 'mode': mode, 'grid': grid,
+                          'block_bins': B, 'columns': cols, 'occupied': occupied,
+                          'sum': total, 'records': []}
                 self.matrices[a, b, u, bin] = matrix
                 if not mode and np:
                     matrix['records'] = self.read_pages(ip, il, np, nb)

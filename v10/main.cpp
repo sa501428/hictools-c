@@ -12,13 +12,13 @@ static void usage() {
            "  hic_v10 convert [options] <input.v9.hic> <output.v10.hic>\n"
            "  hic_v10 addnorm [options] <file.v10.hic>\n\n"
            "Common options:\n"
-           "  --level N          Zstandard compression level (default 3)\n"
+           "  --level N          Zstandard compression level (default 6)\n"
            "\nPre/convert writer options:\n"
            "  -t N               Pair/page writer workers (default 4)\n"
-           "  --block-bins N     Minimum rectangular block width (default 256; max 4096)\n"
-           "  --page-bytes N     Target uncompressed page bytes (default 131072)\n"
-           "  --derive T:S       Derive target BP resolution T from source S; repeatable\n"
-           "                     Both must exist; exact equivalence is verified\n"
+           "  --block-bins N     Additional minimum logical block width (max 4096)\n"
+           "  --page-bytes N     Target uncompressed page bytes (default 524288)\n"
+           "  --derive T:S       Add a nonstandard derived BP resolution; repeatable\n"
+           "                     20/50/200/500/2000 BP are always derived; 500 kb is stored\n"
            "  --scores           Force SCORE_FLOAT32, even for integral values\n\n"
            "Pre options (same parsers and MAPQ filtering as hic_pre):\n"
            "  -r N,N,...         BP resolutions (default: existing V9 resolution set)\n"
@@ -87,8 +87,9 @@ int main(int argc, char **argv) {
                 opts.level = std::stoi(s, &n);
                 hic10::check(n == s.size(), "invalid compression level");
                 addnorm.compression_level = opts.level;
-            } else if (command != "addnorm" && arg == "--block-bins")
+            } else if (command != "addnorm" && arg == "--block-bins") {
                 opts.blockBins = number(value());
+            }
             else if (command != "addnorm" && arg == "--page-bytes")
                 opts.pageBytes = number(value());
             else if (command != "addnorm" && arg == "--derive") {

@@ -49,6 +49,52 @@ inline uint32_t safe_block_bin_count(uint64_t column_bins, uint64_t row_bins, ui
           "matrix grid cannot be represented by u32 block numbers");
     return narrow(block_bins);
 }
+// V10 keeps the V9 high-resolution block-sizing policy: as bin sizes become
+// finer, grow logical blocks so a chromosome axis has hundreds (cis) or tens
+// (trans) of blocks rather than millions. --block-bins remains an additional
+// minimum; it cannot opt back into the pathological tiny-block layout.
+inline uint32_t adaptive_block_bin_count(uint64_t column_bins, uint64_t row_bins,
+                                         uint32_t bin_size, uint32_t requested,
+                                         bool cis) {
+    check(requested && column_bins && row_bins && bin_size, "invalid adaptive block geometry");
+    uint64_t block_bins = requested;
+    constexpr uint64_t BLOCK_CAPACITY = 1000;
+    const uint64_t cutoff = cis ? 500 : 5000;
+    const uint64_t maximum_bins = std::max(column_bins, row_bins);
+    uint64_t target_columns;
+    if (bin_size < cutoff) {
+        using Wide = unsigned __int128;
+        target_columns = static_cast<uint64_t>(
+            Wide(maximum_bins) * bin_size / (BLOCK_CAPACITY * cutoff)) + 1;
+    } else {
+        target_columns = maximum_bins / BLOCK_CAPACITY + 1;
+    }
+    block_bins = std::max<uint64_t>(block_bins, maximum_bins / target_columns + 1);
+    // This also makes rectangular trans block numbers fit u32. Rotated cis
+    // numbering has far fewer rows; validate its exact maximum at the call site.
+    return safe_block_bin_count(column_bins, row_bins, narrow(block_bins));
+}
+inline uint32_t rotated_depth(uint64_t distance, uint32_t block_bins) {
+    check(block_bins, "zero rotated block scale");
+    using Wide = unsigned __int128;
+    const Wide lhs = Wide(distance) * distance;
+    const Wide scale = Wide(2) * block_bins * block_bins;
+    uint32_t depth = 0;
+    while (depth < 32) {
+        const Wide threshold = (Wide(1) << (depth + 1)) - 1;
+        if (threshold * threshold > lhs / scale)
+            break;
+        ++depth;
+    }
+    return depth;
+}
+inline uint32_t rotated_block_number(uint32_t x, uint32_t y, uint32_t block_bins,
+                                     uint32_t columns) {
+    check(x <= y && columns, "invalid rotated cis coordinate");
+    uint64_t depth = rotated_depth(uint64_t(y) - x, block_bins);
+    uint64_t along = (uint64_t(x) + y) / (uint64_t(2) * block_bins);
+    return narrow(depth * columns + along);
+}
 inline uint32_t bits(float x) {
     uint32_t b;
     std::memcpy(&b, &x, 4);
@@ -96,6 +142,38 @@ struct Resolution {
     uint8_t mode = 0, aggregation = 1;
     uint32_t source = UINT32_MAX;
 };
+inline uint32_t required_derived_source(uint32_t bin) {
+    switch (bin) {
+    case 20:
+    case 50:
+        return 10;
+    case 200:
+    case 500:
+        return 100;
+    case 2000:
+        return 1000;
+    default:
+        return 0;
+    }
+}
+inline bool required_materialized_resolution(uint32_t bin) {
+    return bin == 500000;
+}
+inline bool required_bp_resolution_policy(const std::vector<Resolution> &list) {
+    for (uint32_t i = 0; i < list.size(); ++i) {
+        const auto &r = list[i];
+        if (uint32_t source_bin = required_derived_source(r.bin)) {
+            auto source = std::find_if(list.begin(), list.end(),
+                                       [&](const Resolution &s) { return s.bin == source_bin; });
+            if (source == list.end() || !r.mode || r.source != uint32_t(source - list.begin()) ||
+                source->mode)
+                return false;
+        }
+        if (required_materialized_resolution(r.bin) && r.mode)
+            return false;
+    }
+    return true;
+}
 struct Header {
     std::string genome;
     std::vector<std::pair<std::string, std::string>> attributes;
@@ -130,11 +208,11 @@ struct Vector {
     std::map<uint32_t, uint32_t> scales;
 };
 struct Options {
-    int level = 3;
+    int level = 6;
     uint32_t threads = 4;
-    uint32_t blockBins = 256, pageBytes = 128 * 1024;
+    uint32_t blockBins = 256, pageBytes = 512 * 1024;
     std::vector<std::pair<uint32_t, uint32_t>> derived;
-    bool scores = false;
+    bool scores = false, verifyDerived = true;
 };
 class Writer {
   public:

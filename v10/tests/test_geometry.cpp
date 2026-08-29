@@ -21,6 +21,18 @@ int main() {
     // Existing coarser/smaller matrices retain the user-requested block scale.
     assert(hic10::safe_block_bin_count(1000, 750, 256) == 256);
 
+    // The default V10 policy restores V9-style adaptive sizing. Fine cis and
+    // trans matrices use much larger blocks than the old fixed 256-bin grid.
+    const uint32_t cisAdaptive =
+        hic10::adaptive_block_bin_count(chr1Bins, chr1Bins, 10, 256, true);
+    const uint32_t transAdaptive =
+        hic10::adaptive_block_bin_count(chr1Bins, chr2Bins, 10, 256, false);
+    assert(cisAdaptive > 49000);
+    assert(transAdaptive > 490000);
+    const uint32_t cisColumns = hic10::narrow(hic10::ceil_div(chr1Bins, cisAdaptive));
+    assert(hic10::rotated_block_number(0, 0, cisAdaptive, cisColumns) == 0);
+    assert(hic10::rotated_block_number(100, 1000, cisAdaptive, cisColumns) < UINT32_MAX);
+
     // Exercise the real writer at the last block in the hg38-scale grid. This
     // was the call site that previously threw "uint32 overflow".
     char output[] = "/tmp/hic-v10-geometry-XXXXXX";
@@ -35,6 +47,15 @@ int main() {
     header.resolutions[0] = {{10}};
     {
         hic10::Writer writer(output, header, {});
+        writer.matrix(0, 0, [&](uint8_t unit, uint32_t resolution) {
+            assert(unit == 0 && resolution == 0);
+            hic10::Matrix matrix;
+            matrix.cells.push_back({0, 0, 1});
+            matrix.cells.push_back({100, 1000, 1});
+            matrix.cells.push_back({static_cast<uint32_t>(chr1Bins - 2),
+                                    static_cast<uint32_t>(chr1Bins - 1), 1});
+            return matrix;
+        });
         writer.matrix(0, 1, [&](uint8_t unit, uint32_t resolution) {
             assert(unit == 0 && resolution == 0);
             hic10::Matrix matrix;

@@ -35,7 +35,7 @@ def main():
         for name, text in layouts.items():
             path = p/name; path.write_text(text+'\n')
             out = p/(name+'.hic')
-            run([v10, 'pre', '-r', '100,200', '-q', '30', '--derive', '200:100', path, out, chrom])
+            run([v10, 'pre', '-r', '100,200', '-q', '30', path, out, chrom])
             h = Hic(out)
             assert h.norms == []
             assert h.vector_locs[0] == (0, 0) and h.vector_locs[2] == (0, 0)
@@ -44,6 +44,9 @@ def main():
             assert h.records(0, 0, 200) == [(0, 1, 2), (1, 2, 1), (49, 49, 1)]
             assert h.records(0, 1, 100) == [(1, 3, 1)]
             assert h.records(1, 1, 100) == [(0, 2, 1)]
+            assert h.res[0][1][1:] == (1, 1, 0, 0)
+            assert h.matrices[0, 0, 0, 100]['grid'] == 1
+            assert h.matrices[0, 1, 0, 100]['grid'] == 0
             assert h.vectors[1, None, None, 0, 100][0]
             if straw:
                 assert '100\t200\t2' in run([straw, 'observed', 'NONE', out, 'chr1', 'chr1', 'BP', 100])
@@ -188,7 +191,7 @@ def main():
         run([v9, '-r', '100,200', p/'extra.txt', original, chrom])
         assert struct.unpack_from('<I', original.read_bytes(), 4)[0] == 9
         run([addnorm, '--no-scale', original])
-        run([v10, 'convert', '--derive', '200:100', original, converted])
+        run([v10, 'convert', original, converted])
         h = Hic(converted)
         assert h.records(1, 1, 100) == expected100
         assert h.records(1, 1, 200) == [(0, 1, 2), (1, 2, 1), (49, 49, 1)]
@@ -241,8 +244,12 @@ def main():
                         if straw:
                             assert len(run([straw, 'observed', 'NONE', target, 'chr1', 'chr1', 'FRAG', 1]).splitlines()) == 3
         # Many tiny pages force multiple checkpoint groups.
-        bigchrom = p/'big.sizes'; bigchrom.write_text('chr1\t100000\n')
-        many = p/'many.txt'; many.write_text(''.join(f'chr1 {i*20} chr1 {i*20+10}\n' for i in range(3000)))
+        bigchrom = p/'big.sizes'
+        bigchrom.write_text('chr1\t1000000000\nchr2\t1000000000\n')
+        many = p/'many.txt'
+        many.write_text(''.join(
+            f'chr1 {group*6000000+i*10} chr2 {group*6000000+i*10}\n'
+            for group in range(100) for i in range(500)))
         serial_many = p/'many-serial.hic'
         run([v10, 'pre', '-t', '1', '-r', '10', '--block-bins', '1',
              '--page-bytes', '1024', many, serial_many, bigchrom])
@@ -250,19 +257,24 @@ def main():
              '--page-bytes', '1024', many, p/'many.hic', bigchrom])
         assert serial_many.read_bytes() == (p/'many.hic').read_bytes()
         many_hic = Hic(p/'many.hic')
-        assert len(many_hic.pages) > 64 and len(many_hic.records(0, 0, 10)) == 3000
+        assert len(many_hic.pages) > 64 and len(many_hic.records(0, 1, 10)) == 50000
         run([v10, 'addnorm', '--no-scale', p/'many.hic'])
         many_hic = Hic(p/'many.hic')
         assert many_hic.norms == ['VC', 'VC_SQRT']
-        assert len(many_hic.pages) > 64 and len(many_hic.records(0, 0, 10)) == 3000
+        assert len(many_hic.pages) > 64 and len(many_hic.records(0, 1, 10)) == 50000
         if straw:
-            assert len(run([straw, 'observed', 'NONE', p/'many.hic', 'chr1:40000:40100', 'chr1:40000:40100', 'BP', 10]).splitlines()) == 5
+            assert len(run([straw, 'observed', 'NONE', p/'many.hic',
+                            'chr1:60000000:60000100', 'chr2:60000000:60000100',
+                            'BP', 10]).splitlines()) == 10
         # Error handling is transactional and never overwrites an existing file.
         saved = converted.read_bytes()
         for args in [
             ['convert', converted, converted],
             ['convert', converted, p/'no.hic'],
             ['convert', '--derive', '200:75', original, converted],
+            ['pre', '-r', '20', p/'extra.txt', converted, chrom],
+            ['pre', '-r', '100000,500000', '--derive', '500000:100000',
+             p/'extra.txt', converted, chrom],
             ['pre', '-r', '0', p/'extra.txt', converted, chrom],
             ['pre', '--wat', p/'extra.txt', converted, chrom],
         ]: run([v10, *args], ok=False)

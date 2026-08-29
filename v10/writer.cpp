@@ -39,7 +39,7 @@ Bytes block(const std::vector<Cell> &cells, size_t begin, size_t end, bool score
     }
     uint32_t w = narrow(uint64_t(xmax) - x + 1), h = narrow(uint64_t(ymax) - y + 1);
     uint64_t area = uint64_t(w) * h;
-    Bytes sparse, bitmap((area + 7) / 8, 0), direct;
+    Bytes sparse, direct;
     uint64_t prev = 0;
     std::map<uint64_t, size_t> frequencies;
     for (size_t i = 0; i < count; ++i) {
@@ -48,7 +48,6 @@ Bytes block(const std::vector<Cell> &cells, size_t begin, size_t end, bool score
         check(!i || p > prev, "duplicate/out-of-order cell");
         var(sparse, i ? p - prev : p);
         prev = p;
-        bitmap[p / 8] |= 1u << (p % 8);
         scalar(direct, c.value, scores);
         ++frequencies[c.value];
     }
@@ -87,23 +86,42 @@ Bytes block(const std::vector<Cell> &cells, size_t begin, size_t end, bool score
     }
     uint8_t rep = 0, flags = 0;
     Bytes positions = sparse;
-    if (bitmap.size() < positions.size()) {
-        positions = bitmap;
+    uint64_t bitmapBytes = (area + 7) / 8;
+    Bytes bitmap;
+    auto makeBitmap = [&]() -> const Bytes & {
+        if (bitmap.empty()) {
+            check(bitmapBytes <= bitmap.max_size(), "logical block bitmap is too large");
+            bitmap.assign(static_cast<size_t>(bitmapBytes), 0);
+            for (size_t i = 0; i < count; ++i) {
+                auto c = cell(i);
+                uint64_t p = uint64_t(c.y - y) * w + c.x - x;
+                bitmap[p / 8] |= 1u << (p % 8);
+            }
+        }
+        return bitmap;
+    };
+    if (bitmapBytes < positions.size()) {
+        positions = makeBitmap();
         rep = 1;
         flags = 1;
     }
-    Bytes dense;
-    size_t ci = 0;
-    for (uint64_t p = 0; p < area; ++p) {
-        bool present = ci < count && uint64_t(cell(ci).y - y) * w + cell(ci).x - x == p;
-        scalar(dense, present ? cell(ci++).value : 0, scores);
-    }
-    if (dense.size() + (scores ? bitmap.size() : 0) < positions.size() + values.size()) {
-        rep = 2;
-        flags = scores ? 1 : 0;
-        mode = 2;
-        values = std::move(dense);
-        positions = scores ? bitmap : Bytes{};
+    using Wide = unsigned __int128;
+    Wide denseLowerBound = Wide(area) * (scores ? 4u : 1u) + (scores ? bitmapBytes : 0u);
+    if (denseLowerBound < Wide(positions.size()) + values.size()) {
+        Bytes dense;
+        check(area <= dense.max_size() / (scores ? 4u : 1u), "dense logical block is too large");
+        size_t ci = 0;
+        for (uint64_t p = 0; p < area; ++p) {
+            bool present = ci < count && uint64_t(cell(ci).y - y) * w + cell(ci).x - x == p;
+            scalar(dense, present ? cell(ci++).value : 0, scores);
+        }
+        if (dense.size() + (scores ? bitmapBytes : 0) < positions.size() + values.size()) {
+            rep = 2;
+            flags = scores ? 1 : 0;
+            mode = 2;
+            values = std::move(dense);
+            positions = scores ? makeBitmap() : Bytes{};
+        }
     }
     Bytes out;
     put(out, 1, 1);
@@ -222,19 +240,37 @@ Writer::Writer(const std::string &output, Header header, const Options &options,
             check(list[i].bin > 0 && (!i || list[i].bin > list[i - 1].bin),
                   "invalid resolution list");
     }
-    for (auto d : options_.derived) {
+    auto derive = [&](std::pair<uint32_t, uint32_t> d) {
         auto target = header_.resolution(0, d.first), source = header_.resolution(0, d.second);
         check(d.first > d.second && d.first % d.second == 0,
               "derived target must be an integer multiple of finer source");
         auto &r = header_.resolutions[0][target];
-        check(!r.mode, "duplicate derived target");
+        check(!required_materialized_resolution(r.bin),
+              "500 kb is required to remain materialized");
+        if (r.mode) {
+            check(r.source == source, "conflicting derived target sources");
+            return;
+        }
         r.mode = 1;
         r.source = source;
         r.aggregation = 1;
+    };
+    for (auto d : options_.derived)
+        derive(d);
+    // These fine-resolution pyramid levels are virtual in every conforming V10
+    // file. Applying the policy in the writer makes -r describe queryable
+    // resolutions without requiring a fragile list of CLI flags.
+    for (const auto &r : header_.resolutions[0]) {
+        if (uint32_t source = required_derived_source(r.bin))
+            derive({r.bin, source});
+        if (required_materialized_resolution(r.bin))
+            check(!r.mode, "500 kb is required to remain materialized");
     }
     for (const auto &r : header_.resolutions[0])
         if (r.mode)
             check(!header_.resolutions[0][r.source].mode, "chained derivation is forbidden");
+    check(required_bp_resolution_policy(header_.resolutions[0]),
+          "mandatory BP derivation policy is not satisfied");
     std::set<std::string> names;
     for (uint32_t i = 0; i < header_.chromosomes.size(); ++i) {
         const auto &c = header_.chromosomes[i];
@@ -338,18 +374,25 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
     for (uint8_t u = 0; u < 2; ++u)
         for (uint32_t ri = 0; ri < header_.resolutions[u].size(); ++ri, ++ordinal) {
             auto r = header_.resolutions[u][ri];
-            Matrix m = load(u, ri);
-            canonical(m, a, b, header_, u, ri);
-            if (r.mode) {
+            Matrix m;
+            if (r.mode && !options_.verifyDerived) {
                 Matrix src = load(u, r.source);
                 canonical(src, a, b, header_, u, r.source);
-                Matrix derived = aggregate(src, r.bin / header_.resolutions[u][r.source].bin);
-                check(derived.scores == m.scores && derived.cells.size() == m.cells.size(),
+                m = aggregate(src, r.bin / header_.resolutions[u][r.source].bin);
+            } else {
+                m = load(u, ri);
+                canonical(m, a, b, header_, u, ri);
+            }
+            if (r.mode && options_.verifyDerived) {
+                Matrix src = load(u, r.source);
+                canonical(src, a, b, header_, u, r.source);
+                Matrix expected = aggregate(src, r.bin / header_.resolutions[u][r.source].bin);
+                check(expected.scores == m.scores && expected.cells.size() == m.cells.size(),
                       "requested derivation changes source matrix");
                 for (size_t i = 0; i < m.cells.size(); ++i)
-                    check(m.cells[i].x == derived.cells[i].x &&
-                              m.cells[i].y == derived.cells[i].y &&
-                              m.cells[i].value == derived.cells[i].value,
+                    check(m.cells[i].x == expected.cells[i].x &&
+                              m.cells[i].y == expected.cells[i].y &&
+                              m.cells[i].value == expected.cells[i].value,
                           "requested derivation is not bitwise lossless");
             }
             const uint64_t occupied = m.cells.size();
@@ -363,8 +406,15 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
             }
             uint64_t columnBins = header_.bins(a, u, ri);
             uint64_t rowBins = header_.bins(b, u, ri);
-            uint32_t blockBins = safe_block_bin_count(columnBins, rowBins, options_.blockBins);
+            bool rotated = a == b;
+            uint32_t blockBins = adaptive_block_bin_count(
+                columnBins, rowBins, r.bin, options_.blockBins, rotated);
             uint32_t columns = narrow(ceil_div(columnBins, blockBins));
+            if (rotated) {
+                uint64_t maximum = uint64_t(rotated_depth(rowBins - 1, blockBins)) * columns +
+                                   (rowBins - 1) / blockBins;
+                check(maximum <= UINT32_MAX, "rotated cis grid exceeds u32 block numbers");
+            }
             struct Page {
                 uint32_t first, last, raw;
                 uint64_t pos, len;
@@ -373,7 +423,8 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
             uint64_t indexPos = 0, indexLen = 0, blockCount = 0;
             if (!r.mode && !m.cells.empty()) {
                 auto block_number = [&](const Cell &c) {
-                    return narrow(uint64_t(c.y / blockBins) * columns + c.x / blockBins);
+                    return rotated ? rotated_block_number(c.x, c.y, blockBins, columns)
+                                   : narrow(uint64_t(c.y / blockBins) * columns + c.x / blockBins);
                 };
                 // Reorder the existing matrix storage instead of duplicating every
                 // cell into a map of block vectors.
@@ -466,7 +517,7 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
             put(desc, ri, 4);
             put(desc, r.bin, 4);
             put(desc, r.source, 4);
-            put(desc, 0, 1);
+            put(desc, rotated, 1);
             put(desc, 0, 3);
             put(desc, m.scores ? bits(scoreSum) : countSum, 8);
             put(desc, occupied, 8);

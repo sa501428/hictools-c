@@ -20,7 +20,9 @@ build/hic_v10 addnorm -t 8 output.v10.hic
 `hic_v10 addnorm` computes VC, VC_SQRT, and SCALE at both materialized and
 derived resolutions and writes raw and normalized expected vectors. See the
 [V10 documentation](v10/README.md) for details, memory behavior, and legacy
-vector length migration.
+vector length migration. V10 always derives 20, 50, 200, 500, and 2,000 bp from
+their fixed finer anchors, materializes 500 kb, and uses adaptive V9-compatible
+rotated blocks for cis matrices.
 
 ## Requirements
 

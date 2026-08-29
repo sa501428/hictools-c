@@ -84,7 +84,7 @@ uint64_t read_u64(FILE *file, const char *message) {
     return value;
 }
 
-PreparedPair prepare_pair(PairJob job, const std::vector<uint32_t> &resolutions,
+PreparedPair prepare_pair(PairJob job, const std::vector<Resolution> &resolutions,
                           const std::string &tmpDir) {
     std::unique_ptr<FILE, decltype(&fclose)> input(fopen(job.input->path.c_str(), "rb"), &fclose);
     check(bool(input), "cannot reopen pair spool");
@@ -95,7 +95,7 @@ PreparedPair prepare_pair(PairJob job, const std::vector<uint32_t> &resolutions,
     prepared.records = job.records;
     prepared.scores = job.scores;
     prepared.matrices = matrices;
-    prepared.ranges.reserve(resolutions.size());
+    prepared.ranges.resize(resolutions.size());
 
     struct Acc {
         uint64_t count = 0;
@@ -103,7 +103,10 @@ PreparedPair prepare_pair(PairJob job, const std::vector<uint32_t> &resolutions,
         uint32_t firstBits = 0;
         uint64_t n = 0;
     };
-    for (uint32_t bin : resolutions) {
+    for (uint32_t ri = 0; ri < resolutions.size(); ++ri) {
+        if (resolutions[ri].mode)
+            continue;
+        uint32_t bin = resolutions[ri].bin;
         check(fseeko(input.get(), 0, SEEK_SET) == 0, "cannot rewind pair spool");
         std::map<std::pair<uint32_t, uint32_t>, Acc> cells;
         for (uint64_t i = 0; i < job.records; ++i) {
@@ -159,7 +162,7 @@ PreparedPair prepare_pair(PairJob job, const std::vector<uint32_t> &resolutions,
             }
             it = cells.erase(it);
         }
-        prepared.ranges.push_back({static_cast<uint64_t>(offset), count});
+        prepared.ranges[ri] = {static_cast<uint64_t>(offset), count};
     }
     matrices->close();
     return prepared;
@@ -194,7 +197,12 @@ void pre(const std::string &input, const std::string &output, const std::string 
     }
     check(options.threads > 0 && options.threads <= 256, "invalid writer thread count");
     auto pool = std::make_shared<ThreadPool>(options.threads);
-    Writer writer(output, h, options, pool);
+    Options writerOptions = options;
+    // Direct preprocessing defines derived targets by exact source aggregation;
+    // unlike V9 conversion, there is no pre-existing target matrix to verify.
+    writerOptions.verifyDerived = false;
+    Writer writer(output, h, writerOptions, pool);
+    const auto matrixResolutions = writer.header().resolutions[0];
     auto iterator = open_pair_iterator(input, genome, p.format);
     if (auto source = iterator->source_resolution())
         for (auto r : resolutions)
@@ -252,8 +260,8 @@ void pre(const std::string &input, const std::string &output, const std::string 
         job.exact = exactSpool;
         job.input = std::move(spool);
         pending.push_back(pool->submit(
-            [job = std::move(job), resolutions, directory = p.tmpDir]() mutable {
-                return prepare_pair(std::move(job), resolutions, directory);
+            [job = std::move(job), matrixResolutions, directory = p.tmpDir]() mutable {
+                return prepare_pair(std::move(job), matrixResolutions, directory);
             }));
         records = 0;
         scores = options.scores;

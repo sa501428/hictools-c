@@ -35,14 +35,18 @@ merged-nodups/medium/long, header-described DCIC pairs, gzip text, `.bin`, and
 `.bn`. The default BP resolution set is the same as V9. `-f short` selects the
 4/5-column extra-short parser; use auto detection or `-f mnd` for Juicer's
 8/9-column short layout. See `hic_v10 pre --help` for filtering and compression
-options.
+options. Whenever advertised, 20 and 50 bp are derived from 10 bp, 200 and 500
+bp from 100 bp, and 2 kb from 1 kb. The 500 kb level is materialized. These are
+format requirements and do not need `--derive` flags.
 
 Each normalized chromosome pair must occupy one contiguous input block, as with
 `hic_pre`. Positions must be within `[0, chromosomeLength)` after parsing;
 coordinates are consumed using the existing parsers' conventions. The parser
 closes each pair spool in `-T` (default `/tmp`) and hands it to a bounded worker
-pool while it reads ahead into later chromosome pairs. Workers aggregate one
-resolution at a time into compact, disk-backed matrix sections. The ordered
+pool while it reads ahead into later chromosome pairs. Workers aggregate only
+materialized resolutions into compact, disk-backed matrix sections; mandatory
+derived targets are reconstructed from their source without their own input pass
+or temporary matrix. The ordered
 writer consumes those sections while pair preparation continues. By default up
 to `-t` pair jobs are active or waiting; `--read-ahead N` sets a smaller or larger
 explicit spool bound. The same `-t` worker pool performs Zstandard page
@@ -148,40 +152,46 @@ arithmetic overflow produce errors.
 
 ## Derived resolutions
 
-By default every resolution is materialized. To omit redundant matrix pages,
-explicitly request one or more derivations:
+The five expensive high-resolution intermediates are always derived:
 
-```sh
-build/hic_v10 pre -r 100,200,500,1000,2000 \
-  --derive 200:100 --derive 500:100 --derive 2000:1000 \
-  input.pairs output.v10.hic chrom.sizes
+| Target | Required materialized source |
+|---:|---:|
+| 20 bp | 10 bp |
+| 50 bp | 10 bp |
+| 200 bp | 100 bp |
+| 500 bp | 100 bp |
+| 2 kb | 1 kb |
 
-build/hic_v10 convert --derive 500000:100000 input.v9.hic output.v10.hic
-```
-
-Targets and sources must already be present, the source must be finer and
-materialized, and its bin size must divide the target exactly. Before discarding
-a target's pages, the writer compares every target cell against deterministic
-source aggregation. A mismatch, including a float rounding difference, fails the
-operation. It never silently substitutes an approximate derived matrix. Each
-derived resolution retains its own available normalization and expected arrays.
+Advertising a target requires advertising its source. The writer rejects a
+materialized mandatory target, a different source, and any attempt to derive 500
+kb. `--derive T:S` remains available only for additional nonstandard targets.
+During V9 conversion, the writer compares every mandatory or requested target
+cell against deterministic source aggregation before discarding its pages. A
+mismatch, including a float rounding difference, fails conversion. Direct `pre`
+defines these targets from exact source aggregation and never constructs or
+spools redundant target matrices. Each derived resolution retains its own
+available normalization and expected arrays.
 
 ## Storage and output safety
 
-The writer uses rectangular grids, selects sparse, bitmap, or dense blocks and
+The writer requires V9-compatible rotated distance-band grids for cis matrices
+and rectangular grids for trans matrices. It selects sparse, bitmap, or dense blocks and
 all-default, default-exception, or direct value streams, and tries RAW,
 BYTE_SHUFFLE, and XOR32 vector transforms. Page bytes are contiguous within each
-matrix resolution. Defaults are 256-bin blocks, a 128 KiB **uncompressed** page
-target, four workers, Zstandard level 3, and 65,536 values per vector chunk. Use
+matrix resolution. Defaults are a 256-bin minimum block scale, a 512 KiB
+**uncompressed** page target (aiming at the specification's 64–256 KiB compressed
+range), four workers, Zstandard level 6, and 65,536 values per vector chunk. Use
 `-t N` with `pre` to bound pair preparation and page compression together; with
 `convert`, it controls page compression. Use `--read-ahead N` when pair
 accumulators are large and their concurrency needs a tighter memory bound. Queued
 uncompressed pages are bounded to about 64 MiB in addition to active pair
 accumulators; a single large logical block may exceed the page target.
-The 256-bin block scale is a minimum: it is increased automatically for very
-fine or very large matrices so that every logical block number fits the V10
-`u32` field. For example, hg38 chr1 uses 380-bin blocks at 10 bp.
-The V10 reader also supports rotated cis grids written by other producers.
+The 256-bin block scale is only a lower bound. The V9 adaptive sizing formula
+increases it sharply as resolution becomes finer—hg38 chr1 uses roughly 50,000
+bins per rotated cis block at 10 bp—and increases it further if a `u32` block
+number would overflow. `--block-bins` may request a larger lower bound but cannot
+restore tiny fine-resolution blocks. This prevents hundreds of millions of
+one- or two-cell logical blocks and their repeated 40-byte headers.
 
 Output is staged beside its destination, backpatched, flushed, and renamed only
 after completion. Input/output aliases are rejected. A failed operation leaves
