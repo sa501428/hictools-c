@@ -6,6 +6,7 @@ struct PreOptions {
     std::vector<uint32_t> resolutions;
     std::string genome, tmpDir = "/tmp";
     InputFormat format = InputFormat::AUTO;
+    uint32_t readAhead = 0; // 0 uses the writer thread count
     int mapq = 0;
     bool intra = false, nearDiagonal = false;
 };

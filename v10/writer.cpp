@@ -204,15 +204,17 @@ void Writer::patch(uint64_t pos, const Bytes &bytes) {
     write(bytes);
     check(fseeko(file_, saved, SEEK_SET) == 0, "seek failed");
 }
-Writer::Writer(const std::string &output, Header header, const Options &options)
-    : output_(output), header_(std::move(header)), options_(options) {
+Writer::Writer(const std::string &output, Header header, const Options &options,
+               std::shared_ptr<ThreadPool> pool)
+    : output_(output), header_(std::move(header)), options_(options), pool_(std::move(pool)) {
     check(options_.blockBins > 0 && options_.blockBins <= 4096 && options_.pageBytes >= 1024 &&
               options_.pageBytes <= 16 * 1024 * 1024,
           "invalid block/page size");
     check(options_.level >= ZSTD_minCLevel() && options_.level <= ZSTD_maxCLevel(),
           "invalid Zstandard level");
     check(options_.threads > 0 && options_.threads <= 256, "invalid writer thread count");
-    pool_ = std::make_unique<ThreadPool>(options_.threads);
+    if (!pool_)
+        pool_ = std::make_shared<ThreadPool>(options_.threads);
     check(!header_.chromosomes.empty(), "no chromosomes");
     for (auto &list : header_.resolutions) {
         std::sort(list.begin(), list.end(), [](auto a, auto b) { return a.bin < b.bin; });

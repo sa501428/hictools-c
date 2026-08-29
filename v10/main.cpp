@@ -14,7 +14,7 @@ static void usage() {
            "Common options:\n"
            "  --level N          Zstandard compression level (default 3)\n"
            "\nPre/convert writer options:\n"
-           "  -t N               Page-compression threads (default 4)\n"
+           "  -t N               Pair/page writer workers (default 4)\n"
            "  --block-bins N     Minimum rectangular block width (default 256; max 4096)\n"
            "  --page-bytes N     Target uncompressed page bytes (default 131072)\n"
            "  --derive T:S       Derive target BP resolution T from source S; repeatable\n"
@@ -26,6 +26,7 @@ static void usage() {
            "  -f FORMAT          auto|pairs|short|mnd|bin|bn|hbs\n"
            "  -g GENOME          Genome ID stored in header\n"
            "  -T DIR             Pair-spool directory (default /tmp)\n"
+           "  --read-ahead N     Maximum outstanding chromosome pairs (default: -t)\n"
            "  --intra            Retain cis contacts only\n"
            "  --near-diag        Discard cis contacts beyond 10 Mb\n"
            "\nAddnorm options (V10 file is replaced atomically in place):\n"
@@ -107,6 +108,12 @@ int main(int argc, char **argv) {
                 pre.mapq = n;
             } else if (command == "pre" && arg == "-T")
                 pre.tmpDir = value();
+            else if (command == "pre" && arg == "--read-ahead") {
+                auto n = number(value());
+                hic10::check(n > 0 && n <= 256,
+                             "read-ahead count must be between 1 and 256");
+                pre.readAhead = n;
+            }
             else if (command == "pre" && arg == "-g")
                 pre.genome = value();
             else if (command == "pre" && arg == "--intra")

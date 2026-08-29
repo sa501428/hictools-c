@@ -39,13 +39,18 @@ options.
 
 Each normalized chromosome pair must occupy one contiguous input block, as with
 `hic_pre`. Positions must be within `[0, chromosomeLength)` after parsing;
-coordinates are consumed using the existing parsers' conventions. The new path
-uses one temporary pair spool in `-T` (default `/tmp`) and processes one
-chromosome-pair resolution at a time. Its cell accumulator must fit in memory;
-it does not yet spill the accumulator. Logical blocks reuse that accumulator's
-cell storage rather than copying all cells into per-block vectors. Zstandard page
-compression runs in a bounded worker pool (`-t`, default 4), while completed pages
-are appended in deterministic order. The spool is removed on success and failure.
+coordinates are consumed using the existing parsers' conventions. The parser
+closes each pair spool in `-T` (default `/tmp`) and hands it to a bounded worker
+pool while it reads ahead into later chromosome pairs. Workers aggregate one
+resolution at a time into compact, disk-backed matrix sections. The ordered
+writer consumes those sections while pair preparation continues. By default up
+to `-t` pair jobs are active or waiting; `--read-ahead N` sets a smaller or larger
+explicit spool bound. The same `-t` worker pool performs Zstandard page
+compression, so the command does not create a second unbounded set of threads.
+Each active cell accumulator must fit in memory; it does not yet spill cells.
+Logical blocks reuse that accumulator's cell storage rather than copying all
+cells into per-block vectors. All pair and matrix spools are removed on success
+and failure.
 
 Positive integral weights use checked `uint64_t` accumulation, so repeated
 contacts do not lose precision above the float integer limit. Fractional,
@@ -167,10 +172,12 @@ The writer uses rectangular grids, selects sparse, bitmap, or dense blocks and
 all-default, default-exception, or direct value streams, and tries RAW,
 BYTE_SHUFFLE, and XOR32 vector transforms. Page bytes are contiguous within each
 matrix resolution. Defaults are 256-bin blocks, a 128 KiB **uncompressed** page
-target, four page-compression threads, Zstandard level 3, and 65,536 values per
-vector chunk. Use `-t N` with `pre` or `convert` to control writer threads. Queued
-uncompressed pages are bounded to about 64 MiB in addition to the active matrix;
-a single large logical block may exceed the page target.
+target, four workers, Zstandard level 3, and 65,536 values per vector chunk. Use
+`-t N` with `pre` to bound pair preparation and page compression together; with
+`convert`, it controls page compression. Use `--read-ahead N` when pair
+accumulators are large and their concurrency needs a tighter memory bound. Queued
+uncompressed pages are bounded to about 64 MiB in addition to active pair
+accumulators; a single large logical block may exceed the page target.
 The 256-bin block scale is a minimum: it is increased automatically for very
 fine or very large matrices so that every logical block number fits the V10
 `u32` field. For example, hg38 chr1 uses 380-bin blocks at 10 bp.

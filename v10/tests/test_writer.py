@@ -48,6 +48,15 @@ def main():
             if straw:
                 assert '100\t200\t2' in run([straw, 'observed', 'NONE', out, 'chr1', 'chr1', 'BP', 100])
                 assert '300\t100\t1' in run([straw, 'observed', 'NONE', out, 'chr2', 'chr1', 'BP', 100])
+        # Three chromosome pairs exercise bounded parser read-ahead and ordered
+        # pair-section consumption. Worker count must not affect file bytes.
+        serial_pairs = p/'extra-serial.hic'
+        run([v10, 'pre', '-t', '1', '--read-ahead', '1', '-T', p,
+             '-r', '100,200', '-q', '30',
+             '--derive', '200:100', p/'extra.txt', serial_pairs, chrom])
+        parallel_pairs = p/'extra.txt.hic'
+        assert serial_pairs.read_bytes() == parallel_pairs.read_bytes()
+        assert not list(p.glob('hic-v10-*'))
         # V10 addnorm computes vectors for both physical and derived resolutions.
         # It also rebuilds raw expected and normalized expected indexes, without
         # touching the matrix section. A second run replaces rather than grows it.
@@ -160,8 +169,9 @@ def main():
         assert Hic(p/'hbs-max.hic').records(0, 0, 100) == [(1, 2, (1<<64)-1)]
         original_hbs_output = (p/'hbs-max.hic').read_bytes()
         hbs.write_bytes(gzip.compress(hbs_bytes([(1, 1, 1, 2, (1<<64)-1), (1, 1, 1, 2, 1)])))
-        run([v10, 'pre', '-r', '100', hbs, p/'hbs-max.hic', chrom], ok=False)
+        run([v10, 'pre', '-T', p, '-r', '100', hbs, p/'hbs-max.hic', chrom], ok=False)
         assert (p/'hbs-max.hic').read_bytes() == original_hbs_output
+        assert not list(p.glob('hic-v10-*'))
         hbs.write_bytes(gzip.compress(hbs_bytes(records))[:-4])
         for cmd in [[v9], [v10, 'pre']]:
             run(cmd + ['-r', '100', hbs, p/'hbs-max.hic', chrom], ok=False)

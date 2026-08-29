@@ -138,7 +138,8 @@ struct Options {
 };
 class Writer {
   public:
-    Writer(const std::string &output, Header header, const Options &options);
+    Writer(const std::string &output, Header header, const Options &options,
+           std::shared_ptr<ThreadPool> pool = {});
     ~Writer();
     Writer(const Writer &) = delete;
     Writer &operator=(const Writer &) = delete;
@@ -155,7 +156,7 @@ class Writer {
     std::string output_, temporary_;
     Header header_;
     Options options_;
-    std::unique_ptr<ThreadPool> pool_;
+    std::shared_ptr<ThreadPool> pool_;
     struct Entry {
         uint32_t a, b;
         uint64_t pos, len;
