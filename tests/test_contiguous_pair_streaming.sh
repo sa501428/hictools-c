@@ -33,6 +33,12 @@ done >"$SORTED_MND"
 test -s "$TEST_ROOT/sorted.hic"
 test -z "$(find "$SUCCESS_TMP" -type f -print -quit)"
 
+# Ordered staging must make parallel and serial construction byte-identical.
+"$HIC_PRE" -r 100000 -t 1 -T "$SUCCESS_TMP" -f mnd \
+  "$SORTED_MND" "$TEST_ROOT/sorted-serial.hic" "$CHROM_SIZES"
+cmp "$TEST_ROOT/sorted.hic" "$TEST_ROOT/sorted-serial.hic"
+test -z "$(find "$SUCCESS_TMP" -type f -print -quit)"
+
 {
   printf '0\t1\t100\t0\t0\t1\t200\t1\n'
   printf '0\t1\t100\t0\t0\t2\t200\t1\n'

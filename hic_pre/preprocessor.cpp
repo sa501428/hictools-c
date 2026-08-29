@@ -10,6 +10,7 @@
 #include <cassert>
 #include <deque>
 #include <future>
+#include <queue>
 #include <sstream>
 #include <cerrno>
 #include <unistd.h>  // close(), ftruncate()
@@ -339,13 +340,41 @@ void Preprocessor::write_whole_genome_matrix() {
     z.block_column_count = bp.block_column_count;
     z.sum_counts        = whole_genome_sum_counts_;
 
+    std::string staged_path = opts_.tmp_dir + "/hic_pre_section_XXXXXX";
+    std::vector<char> staged_name(staged_path.begin(), staged_path.end());
+    staged_name.push_back('\0');
+    int staged_fd = mkstemp(staged_name.data());
+    if (staged_fd < 0)
+        throw std::runtime_error("Cannot create staged V9 whole-genome section");
+    z.staged_file = std::make_shared<StagedBlockFile>(staged_name.data());
+    std::unique_ptr<FILE, decltype(&fclose)> staged(fdopen(staged_fd, "w+b"), &fclose);
+    if (!staged) {
+        close(staged_fd);
+        throw std::runtime_error("Cannot open staged V9 whole-genome section");
+    }
+
     z.blocks.reserve(whole_genome_blocks_.size());
     for (auto& [bnum, bd] : whole_genome_blocks_) {
-        z.blocks.push_back({bnum, compress_block(bd)});
+        auto compressed = compress_block(bd);
+        if (compressed.size() > INT32_MAX)
+            throw std::runtime_error("Compressed V9 block exceeds signed 32-bit index size");
+        auto offset = ftello(staged.get());
+        if (offset < 0 || fwrite(compressed.data(), 1, compressed.size(), staged.get()) !=
+                              compressed.size())
+            throw std::runtime_error("Cannot write staged V9 whole-genome block");
+        CompressedBlock block;
+        block.block_number = bnum;
+        block.staged_offset = static_cast<uint64_t>(offset);
+        block.staged_size = static_cast<uint32_t>(compressed.size());
+        z.blocks.push_back(std::move(block));
+        std::unordered_map<int64_t, float>().swap(bd.contacts);
     }
     std::sort(z.blocks.begin(), z.blocks.end(),
               [](const auto& a, const auto& b){ return a.block_number < b.block_number; });
     whole_genome_blocks_.clear();
+    if (fflush(staged.get()) != 0)
+        throw std::runtime_error("Cannot flush staged V9 whole-genome section");
+    staged.reset();
 
     writer_->write_matrix(0, 0, {z});
 }
@@ -357,41 +386,54 @@ void Preprocessor::write_whole_genome_matrix() {
 ZoomWriteData Preprocessor::bin_one_resolution(
     int chr1_idx, int chr2_idx,
     int bin_size, int block_bin_count, int block_column_count,
-    FILE* contacts_file, bool is_intra)
+    FILE* contacts_file, bool is_intra, FILE* staged_file,
+    const std::shared_ptr<StagedBlockFile>& staged_owner)
 {
     // Block accumulator (in-memory blocks, spill to disk when full)
     std::unordered_map<int, BlockData> block_map;
     block_map.reserve(BLOCK_CAPACITY);
 
-    // Spill file for when block_map exceeds capacity
-    // (using a per-resolution temp file)
-    std::string spill_path;
-    FILE* spill_file = nullptr;
-    std::vector<std::string> spill_paths;
+    // Sorted runs share one file. Run boundaries allow a one-block-at-a-time
+    // merge without either reloading all data or retaining one file descriptor
+    // per run.
+    struct SpillRun {
+        uint64_t next = 0, end = 0;
+        BlockData head;
+    };
+    std::vector<SpillRun> spill_runs;
+    std::shared_ptr<StagedBlockFile> spill_owner;
+    std::unique_ptr<FILE, decltype(&fclose)> spill_output(nullptr, &fclose);
 
     auto maybe_spill = [&]() {
         if ((int)block_map.size() > BLOCK_CAPACITY) {
-            // Sort by block number and write to spill
-            if (!spill_file) {
-                spill_path = opts_.tmp_dir + "/hic_pre_spill_XXXXXX";
-                std::vector<char> tmpl(spill_path.begin(), spill_path.end());
-                tmpl.push_back('\0');
-                int fd = mkstemp(tmpl.data());
-                if (fd < 0) throw std::runtime_error("mkstemp failed");
-                close(fd);
-                spill_path = tmpl.data();
-                spill_file = fopen(spill_path.c_str(), "wb");
-                if (!spill_file) throw std::runtime_error("Cannot open spill file");
-                spill_paths.push_back(spill_path);
-            }
             std::vector<BlockData> to_spill;
             to_spill.reserve(block_map.size());
             for (auto& [k, v] : block_map) to_spill.push_back(std::move(v));
             block_map.clear();
             std::sort(to_spill.begin(), to_spill.end(),
                       [](const BlockData& a, const BlockData& b){ return a.block_number < b.block_number; });
-            write_blocks_to_tempfile(spill_file, to_spill);
-            fflush(spill_file);
+
+            if (!spill_output) {
+                std::string path = opts_.tmp_dir + "/hic_pre_spill_XXXXXX";
+                std::vector<char> name(path.begin(), path.end());
+                name.push_back('\0');
+                int fd = mkstemp(name.data());
+                if (fd < 0) throw std::runtime_error("Cannot create V9 block spill file");
+                spill_owner = std::make_shared<StagedBlockFile>(name.data());
+                spill_output.reset(fdopen(fd, "w+b"));
+                if (!spill_output) {
+                    close(fd);
+                    throw std::runtime_error("Cannot open V9 block spill file");
+                }
+            }
+            auto begin = ftello(spill_output.get());
+            if (begin < 0)
+                throw std::runtime_error("Cannot determine V9 block spill offset");
+            write_blocks_to_tempfile(spill_output.get(), to_spill);
+            auto end = ftello(spill_output.get());
+            if (end < begin || ferror(spill_output.get()))
+                throw std::runtime_error("Cannot write V9 block spill run");
+            spill_runs.push_back({static_cast<uint64_t>(begin), static_cast<uint64_t>(end), {}});
         }
     };
 
@@ -432,16 +474,10 @@ ZoomWriteData Preprocessor::bin_one_resolution(
         maybe_spill();
     }
 
-    if (spill_file) { fclose(spill_file); spill_file = nullptr; }
-
-    // Merge spill files back into block_map
-    for (auto& sp : spill_paths) {
-        FILE* sf = fopen(sp.c_str(), "rb");
-        if (sf) {
-            merge_blocks_from_tempfile(sf, block_map);
-            fclose(sf);
-            remove(sp.c_str());
-        }
+    if (spill_output) {
+        if (fflush(spill_output.get()) != 0)
+            throw std::runtime_error("Cannot flush V9 block spill file");
+        spill_output.reset();
     }
 
     // Build ZoomWriteData
@@ -450,13 +486,113 @@ ZoomWriteData Preprocessor::bin_one_resolution(
     z.block_bin_count    = block_bin_count;
     z.block_column_count = block_column_count;
     z.sum_counts         = sum_counts;
+    z.staged_file        = staged_owner;
 
-    z.blocks.reserve(block_map.size());
-    for (auto& [bnum, bd] : block_map) {
-        z.blocks.push_back({bnum, compress_block(bd)});
+    auto stage_block = [&](BlockData& bd) {
+        auto compressed = compress_block(bd);
+        if (compressed.size() > INT32_MAX)
+            throw std::runtime_error("Compressed V9 block exceeds signed 32-bit index size");
+        auto offset = ftello(staged_file);
+        if (offset < 0)
+            throw std::runtime_error("Cannot determine staged V9 block offset");
+        if (fwrite(compressed.data(), 1, compressed.size(), staged_file) != compressed.size())
+            throw std::runtime_error("Cannot write staged V9 block");
+        CompressedBlock block;
+        block.block_number = bd.block_number;
+        block.staged_offset = static_cast<uint64_t>(offset);
+        block.staged_size = static_cast<uint32_t>(compressed.size());
+        z.blocks.push_back(std::move(block));
+        std::unordered_map<int64_t, float>().swap(bd.contacts);
+    };
+
+    std::vector<BlockData> memory_run;
+    memory_run.reserve(block_map.size());
+    for (auto& entry : block_map)
+        memory_run.push_back(std::move(entry.second));
+    block_map.clear();
+    block_map.rehash(0);
+    std::sort(memory_run.begin(), memory_run.end(),
+              [](const BlockData& a, const BlockData& b) {
+                  return a.block_number < b.block_number;
+              });
+
+    if (spill_runs.empty()) {
+        z.blocks.reserve(memory_run.size());
+        for (auto& bd : memory_run)
+            stage_block(bd);
+        return z;
     }
-    std::sort(z.blocks.begin(), z.blocks.end(),
-              [](const auto& a, const auto& b){ return a.block_number < b.block_number; });
+
+    std::unique_ptr<FILE, decltype(&fclose)> spill_input(
+        fopen(spill_owner->path.c_str(), "rb"), &fclose);
+    if (!spill_input)
+        throw std::runtime_error("Cannot reopen V9 block spill file");
+    auto advance_spill = [&](size_t run) {
+        auto& state = spill_runs[run];
+        if (state.next == state.end)
+            return false;
+        if (state.next > state.end ||
+            fseeko(spill_input.get(), static_cast<off_t>(state.next), SEEK_SET) != 0)
+            throw std::runtime_error("Invalid V9 block spill run offset");
+        if (!read_block_from_tempfile(spill_input.get(), state.head))
+            throw std::runtime_error("Truncated V9 block spill run");
+        auto next = ftello(spill_input.get());
+        if (next < 0 || static_cast<uint64_t>(next) > state.end)
+            throw std::runtime_error("Invalid V9 block spill run length");
+        state.next = static_cast<uint64_t>(next);
+        return true;
+    };
+
+    struct Cursor {
+        int block;
+        size_t source; // 0 is the final in-memory run; spill runs start at 1
+    };
+    auto later = [](const Cursor& a, const Cursor& b) {
+        return a.block != b.block ? a.block > b.block : a.source > b.source;
+    };
+    std::priority_queue<Cursor, std::vector<Cursor>, decltype(later)> heap(later);
+    size_t memory_index = 0;
+    if (!memory_run.empty())
+        heap.push({memory_run.front().block_number, 0});
+    for (size_t i = 0; i < spill_runs.size(); ++i)
+        if (advance_spill(i))
+            heap.push({spill_runs[i].head.block_number, i + 1});
+
+    z.blocks.reserve(memory_run.size() + BLOCK_CAPACITY);
+    while (!heap.empty()) {
+        const int number = heap.top().block;
+        std::vector<Cursor> matches;
+        while (!heap.empty() && heap.top().block == number) {
+            matches.push_back(heap.top());
+            heap.pop();
+        }
+        // Source ordering matches the previous implementation: the final
+        // in-memory partial block first, followed by spill runs in creation order.
+        BlockData merged;
+        bool initialized = false;
+        for (const auto cursor : matches) {
+            BlockData part;
+            if (cursor.source == 0)
+                part = std::move(memory_run[memory_index++]);
+            else
+                part = std::move(spill_runs[cursor.source - 1].head);
+            if (!initialized) {
+                merged = std::move(part);
+                initialized = true;
+            } else {
+                merged.merge(part);
+            }
+            if (cursor.source == 0) {
+                if (memory_index < memory_run.size())
+                    heap.push({memory_run[memory_index].block_number, 0});
+            } else {
+                size_t run = cursor.source - 1;
+                if (advance_spill(run))
+                    heap.push({spill_runs[run].head.block_number, cursor.source});
+            }
+        }
+        stage_block(merged);
+    }
 
     return z;
 }
@@ -474,6 +610,19 @@ std::vector<ZoomWriteData> Preprocessor::process_chr_pair(
                                  + std::strerror(errno));
     }
 
+    std::string staged_path = opts_.tmp_dir + "/hic_pre_section_XXXXXX";
+    std::vector<char> staged_name(staged_path.begin(), staged_path.end());
+    staged_name.push_back('\0');
+    int staged_fd = mkstemp(staged_name.data());
+    if (staged_fd < 0)
+        throw std::runtime_error("Cannot create staged V9 matrix section");
+    auto staged_owner = std::make_shared<StagedBlockFile>(staged_name.data());
+    std::unique_ptr<FILE, decltype(&fclose)> staged(fdopen(staged_fd, "w+b"), &fclose);
+    if (!staged) {
+        close(staged_fd);
+        throw std::runtime_error("Cannot open staged V9 matrix section");
+    }
+
     std::vector<ZoomWriteData> zooms;
     zooms.reserve(opts_.resolutions.size());
 
@@ -483,9 +632,12 @@ std::vector<ZoomWriteData> Preprocessor::process_chr_pair(
         auto z = bin_one_resolution(
             chr1_idx, chr2_idx,
             bin_size, bp.block_bin_count, bp.block_column_count,
-            cf.get(), is_intra
+            cf.get(), is_intra, staged.get(), staged_owner
         );
         zooms.push_back(std::move(z));
     }
+    if (fflush(staged.get()) != 0)
+        throw std::runtime_error("Cannot flush staged V9 matrix section");
+    staged.reset();
     return zooms;
 }

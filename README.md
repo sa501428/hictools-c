@@ -332,10 +332,14 @@ new_code/
 - **RAM- and descriptor-efficient**: contacts are streamed through the input once
   and distributed to per-chromosome-pair temp files (12 bytes/contact). Only the
   current pair's output file is open during distribution; matrix building opens at
-  most one contact file per active worker.
+  most one contact file per active worker. Sorted block spill runs are merged one
+  logical block at a time. Compressed blocks are staged on disk, so completed
+  workers retain only block offsets while waiting for ordered output.
 - **Parallelism**: `hic_pre` uses a bounded rolling work queue to bin and compress
   multiple chromosome pairs concurrently while ordered output continues on the
-  writer thread. `hic_addnorm` uses multi-threaded matrix-vector multiply for SCALE.
+  writer thread. The writer streams each completed temporary section into the
+  final V9 file and backpatches its index. `hic_addnorm` uses multi-threaded
+  matrix-vector multiply for SCALE.
 - **Single input pass**: the whole-genome matrix and chromosome-pair temp streams
   are accumulated together, avoiding a redundant scan of large MND files.
 - **No external reader dependency**: `hic_addnorm` includes its own lightweight

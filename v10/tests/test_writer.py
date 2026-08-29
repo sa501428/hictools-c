@@ -233,7 +233,12 @@ def main():
         # Many tiny pages force multiple checkpoint groups.
         bigchrom = p/'big.sizes'; bigchrom.write_text('chr1\t100000\n')
         many = p/'many.txt'; many.write_text(''.join(f'chr1 {i*20} chr1 {i*20+10}\n' for i in range(3000)))
-        run([v10, 'pre', '-r', '10', '--block-bins', '1', '--page-bytes', '1024', many, p/'many.hic', bigchrom])
+        serial_many = p/'many-serial.hic'
+        run([v10, 'pre', '-t', '1', '-r', '10', '--block-bins', '1',
+             '--page-bytes', '1024', many, serial_many, bigchrom])
+        run([v10, 'pre', '-t', '4', '-r', '10', '--block-bins', '1',
+             '--page-bytes', '1024', many, p/'many.hic', bigchrom])
+        assert serial_many.read_bytes() == (p/'many.hic').read_bytes()
         many_hic = Hic(p/'many.hic')
         assert len(many_hic.pages) > 64 and len(many_hic.records(0, 0, 10)) == 3000
         run([v10, 'addnorm', '--no-scale', p/'many.hic'])

@@ -1,6 +1,9 @@
 #include "format.h"
+#include "../common/thread_pool.h"
 #include <algorithm>
 #include <cmath>
+#include <deque>
+#include <future>
 #include <set>
 #include <sys/stat.h>
 #include <tuple>
@@ -22,10 +25,13 @@ void scalar(Bytes &b, uint64_t value, bool scores) {
     else
         var(b, value);
 }
-Bytes block(const std::vector<Cell> &cells, bool scores) {
-    check(!cells.empty(), "empty logical block");
+Bytes block(const std::vector<Cell> &cells, size_t begin, size_t end, bool scores) {
+    check(begin < end && end <= cells.size(), "empty logical block");
+    const size_t count = end - begin;
+    auto cell = [&](size_t i) -> const Cell & { return cells[begin + i]; };
     uint32_t x = UINT32_MAX, y = UINT32_MAX, xmax = 0, ymax = 0;
-    for (auto c : cells) {
+    for (size_t i = 0; i < count; ++i) {
+        auto c = cell(i);
         x = std::min(x, c.x);
         y = std::min(y, c.y);
         xmax = std::max(xmax, c.x);
@@ -36,8 +42,8 @@ Bytes block(const std::vector<Cell> &cells, bool scores) {
     Bytes sparse, bitmap((area + 7) / 8, 0), direct;
     uint64_t prev = 0;
     std::map<uint64_t, size_t> frequencies;
-    for (size_t i = 0; i < cells.size(); ++i) {
-        auto c = cells[i];
+    for (size_t i = 0; i < count; ++i) {
+        auto c = cell(i);
         uint64_t p = uint64_t(c.y - y) * w + c.x - x;
         check(!i || p > prev, "duplicate/out-of-order cell");
         var(sparse, i ? p - prev : p);
@@ -55,25 +61,25 @@ Bytes block(const std::vector<Cell> &cells, bool scores) {
         }
     uint8_t mode = 2;
     Bytes values = direct;
-    if (best == cells.size()) {
+    if (best == count) {
         values.clear();
         scalar(values, defaultValue, scores);
         mode = 0;
     } else {
         Bytes exceptions;
         scalar(exceptions, defaultValue, scores);
-        var(exceptions, cells.size() - best);
+        var(exceptions, count - best);
         uint64_t last = 0;
         bool first = true;
-        for (size_t i = 0; i < cells.size(); ++i)
-            if (cells[i].value != defaultValue) {
+        for (size_t i = 0; i < count; ++i)
+            if (cell(i).value != defaultValue) {
                 var(exceptions, first ? i : i - last);
                 last = i;
                 first = false;
             }
-        for (auto c : cells)
-            if (c.value != defaultValue)
-                scalar(exceptions, c.value, scores);
+        for (size_t i = 0; i < count; ++i)
+            if (cell(i).value != defaultValue)
+                scalar(exceptions, cell(i).value, scores);
         if (exceptions.size() < values.size()) {
             values = std::move(exceptions);
             mode = 1;
@@ -89,8 +95,8 @@ Bytes block(const std::vector<Cell> &cells, bool scores) {
     Bytes dense;
     size_t ci = 0;
     for (uint64_t p = 0; p < area; ++p) {
-        bool present = ci < cells.size() && uint64_t(cells[ci].y - y) * w + cells[ci].x - x == p;
-        scalar(dense, present ? cells[ci++].value : 0, scores);
+        bool present = ci < count && uint64_t(cell(ci).y - y) * w + cell(ci).x - x == p;
+        scalar(dense, present ? cell(ci++).value : 0, scores);
     }
     if (dense.size() + (scores ? bitmap.size() : 0) < positions.size() + values.size()) {
         rep = 2;
@@ -110,12 +116,41 @@ Bytes block(const std::vector<Cell> &cells, bool scores) {
     put(out, y, 4);
     put(out, w, 4);
     put(out, h, 4);
-    put(out, cells.size(), 8);
+    put(out, count, 8);
     put(out, positions.size(), 4);
     put(out, values.size(), 4);
     append(out, positions);
     append(out, values);
     return out;
+}
+
+struct EncodedPage {
+    uint32_t first, last, raw;
+    Bytes stored;
+};
+
+EncodedPage encode_page(std::vector<std::pair<uint32_t, Bytes>> pending, int level) {
+    check(!pending.empty(), "empty page");
+    Bytes directory, payload;
+    uint32_t previous = 0;
+    for (size_t i = 0; i < pending.size(); ++i) {
+        var(directory, i ? pending[i].first - previous : pending[i].first);
+        var(directory, pending[i].second.size());
+        previous = pending[i].first;
+    }
+    put(payload, directory.size(), 4);
+    append(payload, directory);
+    for (const auto &p : pending)
+        append(payload, p.second);
+    EncodedPage result{pending.front().first, pending.back().first, narrow(payload.size()), {}};
+    magic(result.stored, "H10P");
+    put(result.stored, 1, 1);
+    put(result.stored, 1, 1);
+    put(result.stored, 0, 2);
+    put(result.stored, result.raw, 4);
+    put(result.stored, pending.size(), 4);
+    append(result.stored, compressed(payload, level));
+    return result;
 }
 void canonical(Matrix &m, uint32_t a, uint32_t b, const Header &h, uint8_t u, uint32_t ri) {
     for (auto c : m.cells)
@@ -176,6 +211,8 @@ Writer::Writer(const std::string &output, Header header, const Options &options)
           "invalid block/page size");
     check(options_.level >= ZSTD_minCLevel() && options_.level <= ZSTD_maxCLevel(),
           "invalid Zstandard level");
+    check(options_.threads > 0 && options_.threads <= 256, "invalid writer thread count");
+    pool_ = std::make_unique<ThreadPool>(options_.threads);
     check(!header_.chromosomes.empty(), "no chromosomes");
     for (auto &list : header_.resolutions) {
         std::sort(list.begin(), list.end(), [](auto a, auto b) { return a.bin < b.bin; });
@@ -333,53 +370,62 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
             std::vector<Page> pages;
             uint64_t indexPos = 0, indexLen = 0, blockCount = 0;
             if (!r.mode && !m.cells.empty()) {
-                std::map<uint32_t, std::vector<Cell>> blocks;
-                for (auto c : m.cells) {
-                    uint32_t number = narrow(uint64_t(c.y / blockBins) * columns + c.x / blockBins);
-                    blocks[number].push_back(c);
-                }
-                blockCount = blocks.size();
-                m.cells.clear();
-                m.cells.shrink_to_fit();
+                auto block_number = [&](const Cell &c) {
+                    return narrow(uint64_t(c.y / blockBins) * columns + c.x / blockBins);
+                };
+                // Reorder the existing matrix storage instead of duplicating every
+                // cell into a map of block vectors.
+                std::sort(m.cells.begin(), m.cells.end(), [&](const Cell &x, const Cell &y) {
+                    return std::make_tuple(block_number(x), x.y, x.x) <
+                           std::make_tuple(block_number(y), y.y, y.x);
+                });
                 std::vector<std::pair<uint32_t, Bytes>> pending;
                 size_t pendingSize = 0;
+                std::deque<std::future<EncodedPage>> queued;
+                // Bound queued raw pages to about 64 MiB even with very large
+                // pages or a very large requested thread count.
+                const size_t byMemory = std::max<size_t>(
+                    1, (64u * 1024u * 1024u) / options_.pageBytes);
+                const size_t window = std::max<size_t>(
+                    1, std::min<size_t>(options_.threads, byMemory));
+                auto consume = [&]() {
+                    EncodedPage encoded = queued.front().get();
+                    queued.pop_front();
+                    uint64_t pos = write(encoded.stored);
+                    pages.push_back({encoded.first, encoded.last, encoded.raw, pos,
+                                     encoded.stored.size()});
+                };
                 auto flush = [&]() {
                     if (pending.empty())
                         return;
-                    Bytes directory, payload;
-                    uint32_t previous = 0;
-                    for (size_t i = 0; i < pending.size(); ++i) {
-                        var(directory, i ? pending[i].first - previous : pending[i].first);
-                        var(directory, pending[i].second.size());
-                        previous = pending[i].first;
-                    }
-                    put(payload, directory.size(), 4);
-                    append(payload, directory);
-                    for (const auto &p : pending)
-                        append(payload, p.second);
-                    Bytes stored;
-                    magic(stored, "H10P");
-                    put(stored, 1, 1);
-                    put(stored, 1, 1);
-                    put(stored, 0, 2);
-                    put(stored, narrow(payload.size()), 4);
-                    put(stored, pending.size(), 4);
-                    append(stored, compressed(payload, options_.level));
-                    uint64_t pos = write(stored);
-                    pages.push_back({pending.front().first, pending.back().first,
-                                     narrow(payload.size()), pos, stored.size()});
-                    pending.clear();
+                    auto page = std::move(pending);
+                    queued.push_back(pool_->submit(
+                        [page = std::move(page), level = options_.level]() mutable {
+                            return encode_page(std::move(page), level);
+                        }));
+                    pending = {};
                     pendingSize = 0;
+                    if (queued.size() >= window)
+                        consume();
                 };
-                for (auto &entry : blocks) {
-                    auto encoded = block(entry.second, m.scores);
+                for (size_t begin = 0; begin < m.cells.size();) {
+                    uint32_t number = block_number(m.cells[begin]);
+                    size_t end = begin + 1;
+                    while (end < m.cells.size() && block_number(m.cells[end]) == number)
+                        ++end;
+                    auto encoded = block(m.cells, begin, end, m.scores);
                     if (pendingSize && pendingSize + encoded.size() > options_.pageBytes)
                         flush();
                     pendingSize += encoded.size();
-                    pending.emplace_back(entry.first, std::move(encoded));
-                    std::vector<Cell>().swap(entry.second);
+                    pending.emplace_back(number, std::move(encoded));
+                    ++blockCount;
+                    begin = end;
                 }
                 flush();
+                while (!queued.empty())
+                    consume();
+                m.cells.clear();
+                m.cells.shrink_to_fit();
                 Bytes blob, checkpoints;
                 constexpr uint32_t interval = 64;
                 for (size_t i = 0; i < pages.size(); ++i) {

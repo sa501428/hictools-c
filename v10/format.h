@@ -8,9 +8,12 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+class ThreadPool;
 
 namespace hic10 {
 using Bytes = std::vector<uint8_t>;
@@ -128,6 +131,7 @@ struct Vector {
 };
 struct Options {
     int level = 3;
+    uint32_t threads = 4;
     uint32_t blockBins = 256, pageBytes = 128 * 1024;
     std::vector<std::pair<uint32_t, uint32_t>> derived;
     bool scores = false;
@@ -151,6 +155,7 @@ class Writer {
     std::string output_, temporary_;
     Header header_;
     Options options_;
+    std::unique_ptr<ThreadPool> pool_;
     struct Entry {
         uint32_t a, b;
         uint64_t pos, len;

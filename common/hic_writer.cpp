@@ -4,6 +4,29 @@
 #include <stdexcept>
 #include <cstring>
 
+StagedBlockFile::~StagedBlockFile() {
+    if (!path.empty()) std::remove(path.c_str());
+}
+
+namespace {
+uint64_t block_size(const CompressedBlock& block) {
+    return block.staged_size ? block.staged_size : block.bytes.size();
+}
+void copy_staged(FILE* source, FILE* destination, uint64_t offset, uint64_t length,
+                 std::vector<uint8_t>& buffer) {
+    if (fseeko(source, static_cast<off_t>(offset), SEEK_SET) != 0)
+        throw std::runtime_error("Cannot seek staged V9 block section");
+    while (length) {
+        size_t wanted = static_cast<size_t>(std::min<uint64_t>(buffer.size(), length));
+        if (std::fread(buffer.data(), 1, wanted, source) != wanted)
+            throw std::runtime_error("Cannot read staged V9 block section");
+        if (std::fwrite(buffer.data(), 1, wanted, destination) != wanted)
+            throw std::runtime_error("Cannot append staged V9 block section");
+        length -= wanted;
+    }
+}
+} // namespace
+
 // ============================================================
 //  Constructor / Destructor
 // ============================================================
@@ -171,10 +194,23 @@ void HicWriter::write_matrix(
         auto& z    = zooms[zi];
 
         int64_t idx_ptr = info.block_index_pos;
+        std::unique_ptr<FILE, decltype(&fclose)> staged(nullptr, &fclose);
+        if (info.zoom->staged_file) {
+            staged.reset(fopen(info.zoom->staged_file->path.c_str(), "rb"));
+            if (!staged)
+                throw std::runtime_error("Cannot open staged V9 block section: " +
+                                         info.zoom->staged_file->path);
+        }
+        std::vector<uint8_t> copy_buffer(staged ? 1024 * 1024 : 0);
         for (const auto& block : z.blocks) {
             int64_t block_start = current_position();
-            size_t block_bytes = block.bytes.size();
-            if (fwrite(block.bytes.data(), 1, block_bytes, f) != block_bytes) {
+            uint64_t block_length = block_size(block);
+            if (block_length > INT32_MAX)
+                throw std::runtime_error("Compressed V9 block exceeds signed 32-bit index size");
+            size_t block_bytes = static_cast<size_t>(block_length);
+            if (staged) {
+                copy_staged(staged.get(), f, block.staged_offset, block_bytes, copy_buffer);
+            } else if (fwrite(block.bytes.data(), 1, block_bytes, f) != block_bytes) {
                 throw std::runtime_error("Error writing compressed block");
             }
 

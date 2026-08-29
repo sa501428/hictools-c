@@ -134,13 +134,18 @@ void pre(const std::string &input, const std::string &output, const std::string 
             Matrix m;
             m.scores = scores;
             m.cells.reserve(cells.size());
-            for (auto e : cells) {
+            // Release tree nodes as their compact Cell replacements are made;
+            // otherwise the complete map and complete vector coexist at return.
+            for (auto it = cells.begin(); it != cells.end();) {
+                const auto &entry = *it;
                 uint64_t value = scores
-                                     ? (e.second.n == 1 ? e.second.firstBits
-                                                        : bits(static_cast<float>(e.second.score)))
-                                     : e.second.count;
+                                     ? (entry.second.n == 1
+                                            ? entry.second.firstBits
+                                            : bits(static_cast<float>(entry.second.score)))
+                                     : entry.second.count;
                 if (scores || value)
-                    m.cells.push_back({e.first.second, e.first.first, value});
+                    m.cells.push_back({entry.first.second, entry.first.first, value});
+                it = cells.erase(it);
             }
             return m;
         });

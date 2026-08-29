@@ -23,10 +23,22 @@
 #include <cstdio>
 #include <cstdint>
 #include <functional>
+#include <memory>
+
+// One worker-owned file containing compressed V9 blocks. The ordered writer
+// streams ranges from it and deletion happens automatically after the matrix is
+// appended (or during exception unwinding).
+struct StagedBlockFile {
+    std::string path;
+    explicit StagedBlockFile(std::string p) : path(std::move(p)) {}
+    ~StagedBlockFile();
+};
 
 struct CompressedBlock {
     int block_number;
     std::vector<uint8_t> bytes;
+    uint64_t staged_offset = 0;
+    uint32_t staged_size = 0;
 };
 
 // Per-zoom-level data ready to write. Compression is completed by preprocessing
@@ -36,6 +48,7 @@ struct ZoomWriteData {
     int  block_bin_count;
     int  block_column_count;
     float sum_counts;
+    std::shared_ptr<StagedBlockFile> staged_file;
     // Blocks sorted by block_number
     std::vector<CompressedBlock> blocks;
 };

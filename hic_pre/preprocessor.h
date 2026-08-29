@@ -13,15 +13,16 @@
 //                          - For each resolution, accumulate into BlockData hash map
 //                          - When in-memory blocks exceed BLOCK_CAPACITY, spill to a second
 //                            temp file per resolution (block-level temp files)
-//                          - After all contacts read, merge temp blocks and write compressed
-//                            blocks to the output .hic file
+//                          - Merge sorted spill runs one block at a time and write compressed
+//                            blocks to a per-pair staged section
 //
 //   Phase 3 (footer):     Write expected values + empty norm vector placeholders.
 //
 // Parallelism:
 //   - Phase 2 bins and compresses different chromosome pairs in parallel using
 //     a bounded rolling work queue.
-//   - Ordered output I/O overlaps with preparation of later chromosome pairs.
+//   - Ordered output I/O streams staged sections while preparation of later
+//     chromosome pairs continues.
 
 #include "../common/hic_file_def.h"
 #include "../common/genome.h"
@@ -122,7 +123,8 @@ private:
     ZoomWriteData bin_one_resolution(
         int chr1_idx, int chr2_idx,
         int bin_size, int block_bin_count, int block_column_count,
-        FILE* contacts_file, bool is_intra
+        FILE* contacts_file, bool is_intra, FILE* staged_file,
+        const std::shared_ptr<StagedBlockFile>& staged_owner
     );
 
     // Phase 3: finalize

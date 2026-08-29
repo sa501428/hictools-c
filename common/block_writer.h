@@ -116,6 +116,10 @@ size_t write_compressed_block(FILE* f, const BlockData& block);
 //                   (int32 bin_x, int32 bin_y, float count) × n
 void write_blocks_to_tempfile(FILE* f, const std::vector<BlockData>& blocks);
 
+// Read one block from a spill run. Returns false only for clean end-of-file and
+// throws for a truncated or invalid run.
+bool read_block_from_tempfile(FILE* f, BlockData& block);
+
 // Read blocks from a temp file (appending to existing map).
 // Returns number of blocks read.
 int merge_blocks_from_tempfile(FILE* f, std::unordered_map<int, BlockData>& block_map);

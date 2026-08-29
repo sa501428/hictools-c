@@ -19,7 +19,7 @@ if(BUILD_TESTING)
   add_executable(test_v10_block_geometry tests/test_geometry.cpp writer.cpp)
   target_include_directories(test_v10_block_geometry PRIVATE
       ${PROJECT_SOURCE_DIR} ${V10_ZSTD_INCLUDE_DIR})
-  target_link_libraries(test_v10_block_geometry PRIVATE ${V10_ZSTD_LIBRARY})
+  target_link_libraries(test_v10_block_geometry PRIVATE ${V10_ZSTD_LIBRARY} Threads::Threads)
   add_test(NAME v10_block_geometry COMMAND test_v10_block_geometry)
 
   set(STRAW_TEST_EXECUTABLE "" CACHE FILEPATH "Optional straw executable for V9/V10 integration tests")

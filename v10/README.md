@@ -42,8 +42,10 @@ Each normalized chromosome pair must occupy one contiguous input block, as with
 coordinates are consumed using the existing parsers' conventions. The new path
 uses one temporary pair spool in `-T` (default `/tmp`) and processes one
 chromosome-pair resolution at a time. Its cell accumulator must fit in memory;
-it does not yet spill binned cells or parallelize compression. The spool is
-removed on success and failure.
+it does not yet spill the accumulator. Logical blocks reuse that accumulator's
+cell storage rather than copying all cells into per-block vectors. Zstandard page
+compression runs in a bounded worker pool (`-t`, default 4), while completed pages
+are appended in deterministic order. The spool is removed on success and failure.
 
 Positive integral weights use checked `uint64_t` accumulation, so repeated
 contacts do not lose precision above the float integer limit. Fractional,
@@ -165,8 +167,10 @@ The writer uses rectangular grids, selects sparse, bitmap, or dense blocks and
 all-default, default-exception, or direct value streams, and tries RAW,
 BYTE_SHUFFLE, and XOR32 vector transforms. Page bytes are contiguous within each
 matrix resolution. Defaults are 256-bin blocks, a 128 KiB **uncompressed** page
-target, Zstandard level 3, and 65,536 values per vector chunk. The uncompressed
-page target bounds working memory; a single large logical block may exceed it.
+target, four page-compression threads, Zstandard level 3, and 65,536 values per
+vector chunk. Use `-t N` with `pre` or `convert` to control writer threads. Queued
+uncompressed pages are bounded to about 64 MiB in addition to the active matrix;
+a single large logical block may exceed the page target.
 The 256-bin block scale is a minimum: it is increased automatically for very
 fine or very large matrices so that every logical block number fits the V10
 `u32` field. For example, hg38 chr1 uses 380-bin blocks at 10 bp.

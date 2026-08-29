@@ -202,6 +202,31 @@ void write_blocks_to_tempfile(FILE* f, const std::vector<BlockData>& blocks) {
     }
 }
 
+bool read_block_from_tempfile(FILE* f, BlockData& block) {
+    uint8_t first[4];
+    size_t got = fread(first, 1, sizeof(first), f);
+    if (got == 0 && feof(f)) return false;
+    if (got != sizeof(first))
+        throw std::runtime_error("Truncated V9 block spill run");
+    int32_t block_num = static_cast<int32_t>(
+        static_cast<uint32_t>(first[0]) |
+        (static_cast<uint32_t>(first[1]) << 8) |
+        (static_cast<uint32_t>(first[2]) << 16) |
+        (static_cast<uint32_t>(first[3]) << 24));
+    int32_t n = fread_int32(f);
+    if (n < 0)
+        throw std::runtime_error("Invalid V9 block spill contact count");
+    BlockData result(block_num);
+    result.contacts.reserve(static_cast<size_t>(n));
+    for (int32_t i = 0; i < n; ++i) {
+        int32_t bx = fread_int32(f);
+        int32_t by = fread_int32(f);
+        result.add(bx, by, fread_float(f));
+    }
+    block = std::move(result);
+    return true;
+}
+
 int merge_blocks_from_tempfile(FILE* f, std::unordered_map<int, BlockData>& block_map) {
     int count = 0;
     while (!feof(f)) {

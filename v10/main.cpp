@@ -14,6 +14,7 @@ static void usage() {
            "Common options:\n"
            "  --level N          Zstandard compression level (default 3)\n"
            "\nPre/convert writer options:\n"
+           "  -t N               Page-compression threads (default 4)\n"
            "  --block-bins N     Minimum rectangular block width (default 256; max 4096)\n"
            "  --page-bytes N     Target uncompressed page bytes (default 131072)\n"
            "  --derive T:S       Derive target BP resolution T from source S; repeatable\n"
@@ -31,7 +32,7 @@ static void usage() {
            "  --no-vc            Skip VC normalization\n"
            "  --no-vc-sqrt       Skip VC_SQRT normalization\n"
            "  --no-scale         Skip SCALE normalization\n"
-           "  -t N               SCALE threads (default 4)\n"
+           "  -t N               SCALE threads for addnorm (default 4)\n"
            "  --tol X            SCALE convergence tolerance (default 1e-4)\n"
            "  --iter N           SCALE maximum total iterations (default 2000)\n"
            "  --min-res N        Minimum BP resolution for SCALE (default all)\n"
@@ -73,6 +74,12 @@ int main(int argc, char **argv) {
             }
             if (command != "addnorm" && arg == "--scores")
                 opts.scores = true;
+            else if (command != "addnorm" && arg == "-t") {
+                auto n = number(value());
+                hic10::check(n > 0 && n <= 256,
+                             "writer thread count must be between 1 and 256");
+                opts.threads = n;
+            }
             else if (arg == "--level") {
                 auto s = value();
                 size_t n = 0;
