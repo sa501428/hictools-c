@@ -222,6 +222,26 @@ def main():
                         for l, r in zip(left, right):
                             assert l[:2] == r[:2] and math.isclose(float(l[2]), float(r[2]), rel_tol=1e-6)
 
+            # The legacy reader emits trans coordinates in file chromosome
+            # order, whereas V10 emits them in requested order. Keep the file
+            # order opposite to lexical name order so straw compare must
+            # reorient V9 records. Conversion also migrates the legacy expected
+            # vector's one-short length to the exact V10 bin count.
+            reverse_v9 = p/'reverse.v9.hic'
+            reverse_v10 = p/'reverse.v10.hic'
+            renamed = original.read_bytes().replace(b'chr1\0', b'chrZ\0').replace(
+                b'chr2\0', b'chrA\0')
+            reverse_v9.write_bytes(renamed)
+            run([v10, 'convert', reverse_v9, reverse_v10])
+            compared = subprocess.run(
+                [straw, 'compare', reverse_v9, reverse_v10, '--all'],
+                capture_output=True, text=True)
+            # Conversion preserves the V9 ALL matrix as an additional V10-only
+            # resolution. It is the sole intentional metadata difference.
+            assert compared.returncode == 1
+            assert 'RESULT: DIFFERENT (1 differences)' in compared.stdout
+            assert compared.stderr.strip() == 'DIFF: resolution 1 only in second file'
+
         for x_int in (False, True):
             for y_int in (False, True):
                 for floating in (False, True):
@@ -243,7 +263,7 @@ def main():
                             assert fixture.vectors[2, 'VC', None, 1, 1]
                         if straw:
                             assert len(run([straw, 'observed', 'NONE', target, 'chr1', 'chr1', 'FRAG', 1]).splitlines()) == 3
-        # Many tiny pages force multiple checkpoint groups.
+        # Many independent blocks exercise exact indexing and parallel compression.
         bigchrom = p/'big.sizes'
         bigchrom.write_text('chr1\t1000000000\nchr2\t1000000000\n')
         many = p/'many.txt'
@@ -252,16 +272,16 @@ def main():
             for group in range(100) for i in range(500)))
         serial_many = p/'many-serial.hic'
         run([v10, 'pre', '-t', '1', '-r', '10', '--block-bins', '1',
-             '--page-bytes', '1024', many, serial_many, bigchrom])
+             many, serial_many, bigchrom])
         run([v10, 'pre', '-t', '4', '-r', '10', '--block-bins', '1',
-             '--page-bytes', '1024', many, p/'many.hic', bigchrom])
+             many, p/'many.hic', bigchrom])
         assert serial_many.read_bytes() == (p/'many.hic').read_bytes()
         many_hic = Hic(p/'many.hic')
-        assert len(many_hic.pages) > 64 and len(many_hic.records(0, 1, 10)) == 50000
+        assert len(many_hic.blocks) > 64 and len(many_hic.records(0, 1, 10)) == 50000
         run([v10, 'addnorm', '--no-scale', p/'many.hic'])
         many_hic = Hic(p/'many.hic')
         assert many_hic.norms == ['VC', 'VC_SQRT']
-        assert len(many_hic.pages) > 64 and len(many_hic.records(0, 1, 10)) == 50000
+        assert len(many_hic.blocks) > 64 and len(many_hic.records(0, 1, 10)) == 50000
         if straw:
             assert len(run([straw, 'observed', 'NONE', p/'many.hic',
                             'chr1:60000000:60000100', 'chr2:60000000:60000100',
@@ -276,6 +296,7 @@ def main():
             ['pre', '-r', '100000,500000', '--derive', '500000:100000',
              p/'extra.txt', converted, chrom],
             ['pre', '-r', '0', p/'extra.txt', converted, chrom],
+            ['pre', '--page-bytes', '1024', p/'extra.txt', converted, chrom],
             ['pre', '--wat', p/'extra.txt', converted, chrom],
         ]: run([v10, *args], ok=False)
         unsorted = p/'unsorted.txt'; unsorted.write_text('chr1 100 chr1 200\nchr1 100 chr2 200\nchr1 200 chr1 400\n')
@@ -289,5 +310,5 @@ def main():
         v9_saved = original.read_bytes()
         run([v10, 'addnorm', original], ok=False)
         assert original.read_bytes() == v9_saved
-    print('V10 writer/addnorm: matrices, derived norms, expected vectors, formats, counts, checkpoints, failure safety passed')
+    print('V10 writer/addnorm: matrices, derived norms, expected vectors, formats, counts, exact block indexes, failure safety passed')
 if __name__ == '__main__': main()

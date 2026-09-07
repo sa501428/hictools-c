@@ -142,31 +142,19 @@ Bytes block(const std::vector<Cell> &cells, size_t begin, size_t end, bool score
     return out;
 }
 
-struct EncodedPage {
-    uint32_t first, last, raw;
+struct EncodedBlock {
+    uint32_t number;
     Bytes stored;
 };
 
-EncodedPage encode_page(std::vector<std::pair<uint32_t, Bytes>> pending, int level) {
-    check(!pending.empty(), "empty page");
-    Bytes directory, payload;
-    uint32_t previous = 0;
-    for (size_t i = 0; i < pending.size(); ++i) {
-        var(directory, i ? pending[i].first - previous : pending[i].first);
-        var(directory, pending[i].second.size());
-        previous = pending[i].first;
-    }
-    put(payload, directory.size(), 4);
-    append(payload, directory);
-    for (const auto &p : pending)
-        append(payload, p.second);
-    EncodedPage result{pending.front().first, pending.back().first, narrow(payload.size()), {}};
-    magic(result.stored, "H10P");
+EncodedBlock encode_block(uint32_t number, Bytes payload, int level) {
+    EncodedBlock result{number, {}};
+    magic(result.stored, "H10B");
     put(result.stored, 1, 1);
     put(result.stored, 1, 1);
     put(result.stored, 0, 2);
-    put(result.stored, result.raw, 4);
-    put(result.stored, pending.size(), 4);
+    put(result.stored, narrow(payload.size()), 4);
+    put(result.stored, number, 4);
     append(result.stored, compressed(payload, level));
     return result;
 }
@@ -225,9 +213,7 @@ void Writer::patch(uint64_t pos, const Bytes &bytes) {
 Writer::Writer(const std::string &output, Header header, const Options &options,
                std::shared_ptr<ThreadPool> pool)
     : output_(output), header_(std::move(header)), options_(options), pool_(std::move(pool)) {
-    check(options_.blockBins > 0 && options_.blockBins <= 4096 && options_.pageBytes >= 1024 &&
-              options_.pageBytes <= 16 * 1024 * 1024,
-          "invalid block/page size");
+    check(options_.blockBins > 0 && options_.blockBins <= 4096, "invalid block size");
     check(options_.level >= ZSTD_minCLevel() && options_.level <= ZSTD_maxCLevel(),
           "invalid Zstandard level");
     check(options_.threads > 0 && options_.threads <= 256, "invalid writer thread count");
@@ -415,12 +401,12 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
                                    (rowBins - 1) / blockBins;
                 check(maximum <= UINT32_MAX, "rotated cis grid exceeds u32 block numbers");
             }
-            struct Page {
-                uint32_t first, last, raw;
-                uint64_t pos, len;
+            struct BlockEntry {
+                uint32_t number, length;
+                uint64_t position;
             };
-            std::vector<Page> pages;
-            uint64_t indexPos = 0, indexLen = 0, blockCount = 0;
+            std::vector<BlockEntry> blocks;
+            uint64_t indexPos = 0, indexLen = 0;
             if (!r.mode && !m.cells.empty()) {
                 auto block_number = [&](const Cell &c) {
                     return rotated ? rotated_block_number(c.x, c.y, blockBins, columns)
@@ -432,80 +418,44 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
                     return std::make_tuple(block_number(x), x.y, x.x) <
                            std::make_tuple(block_number(y), y.y, y.x);
                 });
-                std::vector<std::pair<uint32_t, Bytes>> pending;
-                size_t pendingSize = 0;
-                std::deque<std::future<EncodedPage>> queued;
-                // Bound queued raw pages to about 64 MiB even with very large
-                // pages or a very large requested thread count.
-                const size_t byMemory = std::max<size_t>(
-                    1, (64u * 1024u * 1024u) / options_.pageBytes);
-                const size_t window = std::max<size_t>(
-                    1, std::min<size_t>(options_.threads, byMemory));
+                std::deque<std::future<EncodedBlock>> queued;
+                const size_t window = std::max<size_t>(1, options_.threads);
                 auto consume = [&]() {
-                    EncodedPage encoded = queued.front().get();
+                    EncodedBlock encoded = queued.front().get();
                     queued.pop_front();
-                    uint64_t pos = write(encoded.stored);
-                    pages.push_back({encoded.first, encoded.last, encoded.raw, pos,
-                                     encoded.stored.size()});
-                };
-                auto flush = [&]() {
-                    if (pending.empty())
-                        return;
-                    auto page = std::move(pending);
-                    queued.push_back(pool_->submit(
-                        [page = std::move(page), level = options_.level]() mutable {
-                            return encode_page(std::move(page), level);
-                        }));
-                    pending = {};
-                    pendingSize = 0;
-                    if (queued.size() >= window)
-                        consume();
+                    uint64_t position = write(encoded.stored);
+                    blocks.push_back(
+                        {encoded.number, narrow(encoded.stored.size()), position});
                 };
                 for (size_t begin = 0; begin < m.cells.size();) {
                     uint32_t number = block_number(m.cells[begin]);
                     size_t end = begin + 1;
                     while (end < m.cells.size() && block_number(m.cells[end]) == number)
                         ++end;
-                    auto encoded = block(m.cells, begin, end, m.scores);
-                    if (pendingSize && pendingSize + encoded.size() > options_.pageBytes)
-                        flush();
-                    pendingSize += encoded.size();
-                    pending.emplace_back(number, std::move(encoded));
-                    ++blockCount;
+                    auto payload = block(m.cells, begin, end, m.scores);
+                    queued.push_back(pool_->submit(
+                        [number, payload = std::move(payload), level = options_.level]() mutable {
+                            return encode_block(number, std::move(payload), level);
+                        }));
+                    if (queued.size() >= window)
+                        consume();
                     begin = end;
                 }
-                flush();
                 while (!queued.empty())
                     consume();
                 m.cells.clear();
                 m.cells.shrink_to_fit();
-                Bytes blob, checkpoints;
-                constexpr uint32_t interval = 64;
-                for (size_t i = 0; i < pages.size(); ++i) {
-                    const auto &p = pages[i];
-                    if (i % interval == 0) {
-                        put(checkpoints, i, 4);
-                        put(checkpoints, std::min<size_t>(interval, pages.size() - i), 4);
-                        put(checkpoints, p.first, 4);
-                        put(checkpoints, 0, 4);
-                        put(checkpoints, p.pos, 8);
-                        put(checkpoints, blob.size(), 8);
-                    } else
-                        var(blob, p.first - pages[i - 1].last - 1);
-                    var(blob, p.last - p.first);
-                    var(blob, p.len);
-                    var(blob, p.raw);
-                }
                 Bytes idx;
                 magic(idx, "H10I");
-                put(idx, 1, 4);
-                put(idx, pages.size(), 4);
-                put(idx, interval, 4);
-                put(idx, (pages.size() + interval - 1) / interval, 4);
+                put(idx, 2, 4);
+                put(idx, uint64_t(24) + uint64_t(blocks.size()) * 16, 8);
+                put(idx, narrow(blocks.size()), 4);
                 put(idx, 0, 4);
-                put(idx, blob.size(), 8);
-                append(idx, checkpoints);
-                append(idx, blob);
+                for (const auto &entry : blocks) {
+                    put(idx, entry.number, 4);
+                    put(idx, entry.length, 4);
+                    put(idx, entry.position, 8);
+                }
                 indexPos = write(idx);
                 indexLen = idx.size();
             }
@@ -527,8 +477,8 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
             put(desc, columns, 4);
             put(desc, indexPos, 8);
             put(desc, indexLen, 8);
-            put(desc, pages.size(), 4);
-            put(desc, blockCount, 4);
+            put(desc, narrow(blocks.size()), 4);
+            put(desc, 0, 4);
             patch(metaPos + 24 + uint64_t(ordinal) * 76, desc);
         }
 }

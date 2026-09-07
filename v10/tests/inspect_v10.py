@@ -90,13 +90,13 @@ class Hic:
         c = Cursor(self.data[footer:footer+footerlen]); assert c.take(4) == b'H10F' and c.u32() == 1 and c.u64() == footerlen
         n, zero = c.unpack('II'); assert zero == 0
         entries = [c.unpack('IIQQ') for _ in range(n)]; c.done()
-        self.matrices, self.pages = {}, []
+        self.matrices, self.blocks = {}, []
         for a, b, pos, size in entries:
             c = Cursor(self.data[pos:pos+size]); assert c.take(4) == b'H10M'
             ver, ca, cb, nr, zero = c.unpack('5I'); assert (ver, ca, cb, zero) == (1, a, b, 0)
             assert nr == sum(map(len, self.res))
             for _ in range(nr):
-                u, mode, agg, typ, ri, bin, source, grid, total, occupied, sd, pc, B, cols, ip, il, np, nb = c.unpack('4B3IB3xQQII2IQQ2I')
+                u, mode, agg, typ, ri, bin, source, grid, total, occupied, sd, pc, B, cols, ip, il, nb, reserved = c.unpack('4B3IB3xQQII2IQQ2I')
                 assert (bin, mode, agg, 0, source) == self.res[u][ri]
                 assert sd == pc == 0x7fc00000
                 assert grid == int(a == b)
@@ -104,8 +104,9 @@ class Hic:
                           'block_bins': B, 'columns': cols, 'occupied': occupied,
                           'sum': total, 'records': []}
                 self.matrices[a, b, u, bin] = matrix
-                if not mode and np:
-                    matrix['records'] = self.read_pages(ip, il, np, nb)
+                assert reserved == 0
+                if not mode and nb:
+                    matrix['records'] = self.read_blocks(ip, il, nb)
                 if not mode:
                     assert len(matrix['records']) == occupied
                     if typ == 0: assert sum(v for _, _, v in matrix['records']) == total
@@ -141,32 +142,21 @@ class Hic:
                 e.done()
                 self.vectors[kind, self.norms[norm] if norm is not None else None, chr, unit, bin] = (words, scales)
             c.done()
-    def read_pages(self, pos, length, expected_pages, expected_blocks):
+    def read_blocks(self, pos, length, expected_blocks):
         c = Cursor(self.data[pos:pos+length]); assert c.take(4) == b'H10I'
-        ver, n, interval, nc, zero, bloblen = c.unpack('5IQ')
-        assert ver == 1 and n == expected_pages and zero == 0 and nc == (n+interval-1)//interval
-        checks = [c.unpack('4I2Q') for _ in range(nc)]; blob = Cursor(c.take(bloblen)); c.done()
-        records, blocks, pages, previous_end = [], 0, 0, None
-        for ordinal, group, first, zero, pos, offset in checks:
-            assert ordinal == pages and offset == blob.at and zero == 0
-            if previous_end is not None: assert pos == previous_end
-            for i in range(group):
-                if i: first = last+1+blob.var()
-                last, size, raw = first+blob.var(), blob.var(), blob.var()
-                page = Cursor(self.data[pos:pos+size]); assert page.take(4) == b'H10P'
-                codec, ver, flags, uncompressed, count = page.unpack('BBHII')
-                assert (codec, ver, flags, uncompressed) == (1, 1, 0, raw)
-                body = Cursor(decompress(page.take(size-16), raw)); directory = Cursor(body.take(body.u32()))
-                entries, prev = [], 0
-                for j in range(count):
-                    delta, length = directory.var(), directory.var(); prev = prev+delta if j else delta; entries.append((prev, length))
-                directory.done(); assert entries[0][0] == first and entries[-1][0] == last
-                for _, length in entries:
-                    _, cells = block(body.take(length)); records += cells
-                body.done(); blocks += count; pages += 1; pos += size
-                self.pages.append((first, last, size))
-            previous_end = pos
-        blob.done(); assert blocks == expected_blocks and pages == expected_pages
+        ver, index_length, n, zero = c.unpack('IQII')
+        assert ver == 2 and index_length == length == 24 + n*16
+        assert n == expected_blocks and zero == 0
+        entries = [c.unpack('IIQ') for _ in range(n)]; c.done()
+        assert all(entries[i-1][0] < entries[i][0] for i in range(1, n))
+        records = []
+        for number, size, pos in entries:
+            stored = Cursor(self.data[pos:pos+size]); assert stored.take(4) == b'H10B'
+            codec, record_version, flags, raw, embedded_number = stored.unpack('BBHII')
+            assert (codec, record_version, flags, embedded_number) == (1, 1, 0, number)
+            _, cells = block(decompress(stored.take(size-16), raw)); stored.done()
+            records += cells
+            self.blocks.append((number, size, pos))
         assert len({(x, y) for x, y, _ in records}) == len(records)
         return sorted(records)
     def records(self, a, b, bin, unit=0):

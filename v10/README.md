@@ -1,8 +1,8 @@
 # V10 tools
 
 This directory implements the consolidated `HiCFormatV10.md` wire format from
-`hic-format`: the 88-byte header, numeric matrix directory, Zstandard pages,
-checkpoint indexes, sparse/bitmap/dense blocks, explicit integer counts, and
+`hic-format`: the 88-byte header, numeric matrix directory, independently
+compressed Zstandard blocks, exact block indexes, sparse/bitmap/dense payloads, explicit integer counts, and
 chunked normalization and expected arrays. It is **not** the earlier experimental
 format that added delta/all-one flags to V9 blocks.
 
@@ -50,7 +50,7 @@ derived targets are reconstructed from their source without their own input pass
 or temporary matrix. The ordered
 writer consumes those sections while pair preparation continues. By default up
 to `-t` pair jobs are active or waiting; `--read-ahead N` sets a smaller or larger
-explicit spool bound. The same `-t` worker pool performs Zstandard page
+explicit spool bound. The same `-t` worker pool performs Zstandard block
 compression, so the command does not create a second unbounded set of threads.
 Each active cell accumulator must fit in memory; it does not yet spill cells.
 Logical blocks reuse that accumulator's cell storage rather than copying all
@@ -90,7 +90,7 @@ build/hic_v10 addnorm -t 8 output.v10.hic
 
 `hic_v10 addnorm` computes VC, VC_SQRT, and SCALE for every advertised BP and
 FRAG resolution. For a materialized resolution it reads that resolution's
-pages; for a derived resolution it deterministically aggregates its declared
+independent blocks; for a derived resolution it deterministically aggregates its declared
 source in memory and normalizes the resulting cells. Raw expected (`EVI0`) is
 rebuilt for every resolution, and each enabled normalization gets a normalized
 expected (`NEVI`) vector with chromosome scale factors.
@@ -169,7 +169,7 @@ Advertising a target requires advertising its source. The writer rejects a
 materialized mandatory target, a different source, and any attempt to derive 500
 kb. `--derive T:S` remains available only for additional nonstandard targets.
 During V9 conversion, the writer compares every mandatory or requested target
-cell against deterministic source aggregation before discarding its pages. A
+cell against deterministic source aggregation before discarding its blocks. A
 mismatch, including a float rounding difference, fails conversion. Direct `pre`
 defines these targets from exact source aggregation and never constructs or
 spools redundant target matrices. Each derived resolution retains its own
@@ -180,15 +180,15 @@ available normalization and expected arrays.
 The writer requires V9-compatible rotated distance-band grids for cis matrices
 and rectangular grids for trans matrices. It selects sparse, bitmap, or dense blocks and
 all-default, default-exception, or direct value streams, and tries RAW,
-BYTE_SHUFFLE, and XOR32 vector transforms. Page bytes are contiguous within each
-matrix resolution. Defaults are a 256-bin minimum block scale, a 512 KiB
-**uncompressed** page target (aiming at the specification's 64–256 KiB compressed
-range), four workers, Zstandard level 6, and 65,536 values per vector chunk. Use
-`-t N` with `pre` to bound pair preparation and page compression together; with
-`convert`, it controls page compression. Use `--read-ahead N` when pair
-accumulators are large and their concurrency needs a tighter memory bound. Queued
-uncompressed pages are bounded to about 64 MiB in addition to active pair
-accumulators; a single large logical block may exceed the page target.
+BYTE_SHUFFLE, and XOR32 vector transforms. Each logical block is stored as one
+`H10B` record with its own Zstandard frame. An `H10I` version-2 index stores the
+exact block number, stored length, and absolute position for every block. Defaults
+are a 256-bin minimum block scale, four workers, Zstandard level 6, and 65,536
+values per vector chunk. Use `-t N` with `pre` to bound pair preparation and block
+compression together; with `convert`, it controls block compression. Use
+`--read-ahead N` when pair accumulators are large and their concurrency needs a
+tighter memory bound. At most `-t` encoded logical blocks are queued for ordered
+output in addition to active pair accumulators.
 The 256-bin block scale is only a lower bound. The V9 adaptive sizing formula
 increases it sharply as resolution becomes finer—hg38 chr1 uses roughly 50,000
 bins per rotated cis block at 10 bp—and increases it further if a `u32` block
@@ -210,7 +210,7 @@ ctest --test-dir build --output-on-failure
 The V10 test uses an independent Python decoder and independent V9 fixtures. It
 covers direct input formats, integer precision, score bits, derived resolution
 validation, sparse/dense V9 variants, FRAG conversion, duplicate attributes,
-normalization bits, multiple page checkpoint groups, and transactional failures.
+normalization bits, exact multi-block indexes, and transactional failures.
 Python uses the system zstd shared library through `ctypes`.
 
 Optionally test V9/V10 query parity with the updated straw executable:

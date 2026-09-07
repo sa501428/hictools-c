@@ -210,7 +210,7 @@ struct Vector {
 struct Options {
     int level = 6;
     uint32_t threads = 4;
-    uint32_t blockBins = 256, pageBytes = 512 * 1024;
+    uint32_t blockBins = 256;
     std::vector<std::pair<uint32_t, uint32_t>> derived;
     bool scores = false, verifyDerived = true;
 };
@@ -222,7 +222,7 @@ class Writer {
     Writer(const Writer &) = delete;
     Writer &operator=(const Writer &) = delete;
     // Callback loads one resolution at a time; matrix storage is bounded by one
-    // chromosome-pair resolution plus the currently assembled page.
+    // chromosome-pair resolution plus the logical blocks queued for compression.
     void matrix(uint32_t chr1, uint32_t chr2, const std::function<Matrix(uint8_t, uint32_t)> &load);
     void finish(const std::vector<Vector> &vectors);
     const Header &header() const {

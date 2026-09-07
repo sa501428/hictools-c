@@ -246,28 +246,27 @@ std::vector<uint64_t> Reader::matrix_relocation_fields() {
     for (auto key : matrix_keys_) {
         const auto &meta = metadata(key);
         for (const auto &z : meta.zooms) {
-            if (!z.page_index.length)
+            if (!z.block_index.length)
                 continue;
-            fields.push_back(z.page_index_position_field);
-            auto bytes = read_bytes(z.page_index.position, z.page_index.length);
+            fields.push_back(z.block_index_position_field);
+            auto bytes = read_bytes(z.block_index.position, z.block_index.length);
             Cursor c(bytes);
             c.magic4("H10I");
-            check(c.word() == 1 && c.word() == z.pages, "V10 page index mismatch");
-            uint32_t interval = c.word(), groups = c.word();
+            check(c.word() == 2 && c.wide() == z.block_index.length,
+                  "V10 block index mismatch");
+            uint32_t blocks = c.word();
             c.zero(4);
-            uint64_t blob_length = c.wide();
-            check(interval && groups == (uint64_t(z.pages) + interval - 1) / interval,
-                  "invalid V10 checkpoint count");
-            for (uint32_t i = 0; i < groups; ++i) {
+            check(blocks == z.blocks && z.block_index.length == 24 + uint64_t(blocks) * 16,
+                  "invalid V10 block index length");
+            uint32_t previous = 0;
+            for (uint32_t i = 0; i < blocks; ++i) {
+                uint32_t number = c.word();
+                check(!i || number > previous, "unordered V10 block index");
+                previous = number;
                 c.word();
-                c.word();
-                c.word();
-                c.zero(4);
-                fields.push_back(z.page_index.position + c.at);
-                c.wide();
+                fields.push_back(z.block_index.position + c.at);
                 c.wide();
             }
-            c.take(blob_length);
             c.done();
         }
     }
@@ -309,10 +308,10 @@ const Reader::MatrixMeta &Reader::metadata(MatrixKey key) {
         c.word();
         z.block_bins = c.word();
         z.columns = c.word();
-        z.page_index_position_field = found->second.position + 24 + uint64_t(i) * 76 + 52;
-        z.page_index = locator(c);
-        z.pages = c.word();
+        z.block_index_position_field = found->second.position + 24 + uint64_t(i) * 76 + 52;
+        z.block_index = locator(c);
         z.blocks = c.word();
+        c.zero(4);
         uint8_t expected_unit = i < header_.resolutions[0].size() ? 0 : 1;
         uint32_t expected_ri = i - (expected_unit ? header_.resolutions[0].size() : 0);
         const auto &r = header_.resolutions[expected_unit][expected_ri];
@@ -324,13 +323,14 @@ const Reader::MatrixMeta &Reader::metadata(MatrixKey key) {
                                          z.block_bins),
               "V10 zoom mismatch");
         if (z.mode)
-            check(!z.page_index.length && !z.pages && !z.blocks,
+            check(!z.block_index.length && !z.blocks,
                   "derived V10 resolution has storage");
         else if (z.occupied)
-            check(z.page_index.length && z.pages && z.blocks,
+            check(z.block_index.length && z.blocks,
                   "materialized V10 resolution lacks storage");
         else
-            check(!z.pages && !z.blocks, "empty V10 resolution has pages");
+            check(!z.block_index.length && !z.blocks,
+                  "empty V10 resolution has block storage");
         meta.zooms.push_back(z);
     }
     c.done();
@@ -339,182 +339,148 @@ const Reader::MatrixMeta &Reader::metadata(MatrixKey key) {
 Matrix Reader::materialized(MatrixKey key, const Zoom &z) {
     Matrix result;
     result.scores = z.type != 0;
-    if (!z.pages)
+    if (!z.blocks)
         return result;
-    auto index = read_bytes(z.page_index.position, z.page_index.length);
+    auto index = read_bytes(z.block_index.position, z.block_index.length);
     Cursor c(index);
     c.magic4("H10I");
-    check(c.word() == 1 && c.word() == z.pages, "V10 page index mismatch");
-    uint32_t interval = c.word(), groups = c.word();
+    check(c.word() == 2 && c.wide() == z.block_index.length,
+          "V10 block index mismatch");
+    uint32_t blockCount = c.word();
     c.zero(4);
-    uint64_t blobLength = c.wide();
-    check(interval && groups == (uint64_t(z.pages) + interval - 1) / interval,
-          "invalid V10 checkpoint count");
-    struct Checkpoint {
-        uint32_t first, n, block;
-        uint64_t position, offset;
-    };
-    std::vector<Checkpoint> checkpoints;
-    for (uint32_t i = 0; i < groups; ++i) {
-        Checkpoint q{c.word(), c.word(), c.word(), 0, 0};
-        c.zero(4);
-        q.position = c.wide();
-        q.offset = c.wide();
-        checkpoints.push_back(q);
-    }
-    Cursor blob = c.take(blobLength);
-    c.done();
-    uint32_t pages = 0;
-    for (const auto &q : checkpoints) {
-        check(q.first == pages && q.offset == blob.at && q.n && q.n <= interval,
-              "invalid V10 checkpoint");
-        uint64_t position = q.position;
-        uint32_t first = q.block, last = 0;
-        for (uint32_t i = 0; i < q.n; ++i) {
-            if (i)
-                first = narrow(uint64_t(last) + 1 + blob.var());
-            last = narrow(uint64_t(first) + blob.var());
-            uint64_t stored = blob.var();
-            uint32_t raw = narrow(blob.var());
-            auto page = read_bytes(position, stored);
-            position += stored;
-            Cursor pc(page);
-            pc.magic4("H10P");
-            check(pc.byte() == 1 && pc.byte() == 1, "unsupported V10 page codec");
-            pc.zero(2);
-            check(pc.word() == raw, "V10 page size mismatch");
-            uint32_t blockCount = pc.word();
-            check(blockCount && blockCount <= raw / 42, "invalid V10 page block count");
-            auto payload = decompress(pc, raw);
-            Cursor body(payload);
-            Cursor directory = body.take(body.word());
-            struct BlockRef {
-                uint32_t number;
-                uint64_t length;
-            };
-            std::vector<BlockRef> refs;
-            uint32_t number = 0;
-            for (uint32_t bi = 0; bi < blockCount; ++bi) {
-                uint64_t delta = directory.var();
-                check(!bi || delta, "duplicate V10 block number");
-                number = narrow(bi ? uint64_t(number) + delta : delta);
-                uint64_t length = directory.var();
-                check(length >= 40, "invalid V10 block length");
-                refs.push_back({number, length});
+    check(blockCount == z.blocks &&
+              z.block_index.length == 24 + uint64_t(blockCount) * 16,
+          "invalid V10 block index length");
+    uint32_t previous = 0;
+    for (uint32_t i = 0; i < blockCount; ++i) {
+        uint32_t number = c.word();
+        check(!i || number > previous, "unordered V10 block index");
+        previous = number;
+        uint32_t storedBytes = c.word();
+        uint64_t position = c.wide();
+        check(storedBytes >= 16, "invalid V10 stored block length");
+        auto stored = read_bytes(position, storedBytes);
+        Cursor record(stored);
+        record.magic4("H10B");
+        check(record.byte() == 1 && record.byte() == 1,
+              "unsupported V10 block codec or record version");
+        record.zero(2);
+        uint32_t raw = record.word();
+        check(record.word() == number && raw >= 40,
+              "V10 block record mismatch");
+        auto payload = decompress(record, raw);
+        Cursor b(payload);
+        check(b.byte() == 1, "unsupported V10 block version");
+        uint8_t rep = b.byte(), mode = b.byte(), type = b.byte(),
+                flags = b.byte();
+        b.zero(3);
+        uint32_t x = b.word(), y = b.word(), w = b.word(), h = b.word();
+        uint64_t occupied = b.wide();
+        uint32_t np = b.word(), nv = b.word();
+        check(type == z.type && rep <= 2 && mode <= 2 && flags <= 1 && w && h &&
+                  occupied,
+              "invalid V10 block");
+        Cursor positions = b.take(np), values = b.take(nv);
+        b.done();
+        uint64_t cells = uint64_t(w) * h, slots = rep == 2 ? cells : occupied;
+        check(occupied <= cells && slots <= RECORD_LIMIT / sizeof(uint64_t),
+              "oversized V10 block");
+        std::vector<uint64_t> present;
+        if (rep == 0) {
+            check(!flags && occupied <= np,
+                  "invalid V10 sparse position stream");
+            uint64_t previous = 0;
+            for (uint64_t k = 0; k < occupied; ++k) {
+                uint64_t d = positions.var();
+                check(!k || d, "duplicate V10 sparse cell");
+                previous = k ? plus(previous, d) : d;
+                check(previous < cells, "V10 sparse cell outside block");
+                present.push_back(previous);
             }
-            directory.done();
-            check(refs.front().number == first && refs.back().number == last,
-                  "V10 page block range mismatch");
-            for (const auto &ref : refs) {
-                Cursor b = body.take(ref.length);
-                check(b.byte() == 1, "unsupported V10 block version");
-                uint8_t rep = b.byte(), mode = b.byte(), type = b.byte(), flags = b.byte();
-                b.zero(3);
-                uint32_t x = b.word(), y = b.word(), w = b.word(), h = b.word();
-                uint64_t occupied = b.wide();
-                uint32_t np = b.word(), nv = b.word();
-                check(type == z.type && rep <= 2 && mode <= 2 && flags <= 1 && w && h && occupied,
-                      "invalid V10 block");
-                Cursor positions = b.take(np), values = b.take(nv);
-                b.done();
-                uint64_t cells = uint64_t(w) * h, slots = rep == 2 ? cells : occupied;
-                check(occupied <= cells && slots <= RECORD_LIMIT / sizeof(uint64_t),
-                      "oversized V10 block");
-                std::vector<uint64_t> present;
-                if (rep == 0) {
-                    check(!flags && occupied <= np, "invalid V10 sparse position stream");
-                    uint64_t previous = 0;
-                    for (uint64_t k = 0; k < occupied; ++k) {
-                        uint64_t d = positions.var();
-                        check(!k || d, "duplicate V10 sparse cell");
-                        previous = k ? plus(previous, d) : d;
-                        check(previous < cells, "V10 sparse cell outside block");
-                        present.push_back(previous);
-                    }
-                } else if (rep == 1 || type) {
-                    check(flags == 1 && np == (cells + 7) / 8,
-                          "invalid V10 presence bitmap");
-                    if (cells % 8)
-                        check((positions.data[np - 1] >> (cells % 8)) == 0,
-                              "nonzero V10 bitmap padding");
-                    for (uint64_t k = 0; k < cells; ++k)
-                        if (positions.data[k / 8] & (1u << (k % 8)))
-                            present.push_back(k);
-                    check(present.size() == occupied, "V10 bitmap population mismatch");
-                    positions.at = positions.size;
-                } else
-                    check(!flags && !np, "dense V10 counts have a presence stream");
-                positions.done();
-                check(rep != 2 || mode == 2, "dense V10 values must use direct mode");
-                auto scalar = [&]() { return type ? uint64_t(values.word()) : values.var(); };
-                std::vector<uint64_t> decoded;
-                if (mode == 0)
-                    decoded.assign(slots, scalar());
-                else if (mode == 1) {
-                    uint64_t def = scalar(), ne = values.var();
-                    check(ne && ne < slots && ne <= values.left(),
-                          "invalid V10 exception count");
-                    std::vector<uint64_t> ord;
-                    uint64_t previous = 0;
-                    for (uint64_t k = 0; k < ne; ++k) {
-                        uint64_t d = values.var();
-                        check(!k || d, "duplicate V10 exception ordinal");
-                        previous = k ? plus(previous, d) : d;
-                        check(previous < slots, "V10 exception ordinal out of range");
-                        ord.push_back(previous);
-                    }
-                    decoded.assign(slots, def);
-                    for (auto o : ord) {
-                        uint64_t exception = scalar();
-                        check(exception != def, "V10 exception equals default");
-                        decoded[o] = exception;
-                    }
-                } else {
-                    decoded.reserve(slots);
-                    for (uint64_t k = 0; k < slots; ++k)
-                        decoded.push_back(scalar());
-                }
-                values.done();
-                uint64_t emitted = 0;
-                size_t pi = 0;
-                for (uint64_t k = 0; k < slots; ++k) {
-                    bool exists = true;
-                    uint64_t local = rep == 2 ? k : present[k], value = decoded[k];
-                    if (rep == 2) {
-                        if (!type)
-                            exists = value != 0;
-                        else {
-                            exists = pi < present.size() && present[pi] == k;
-                            if (exists)
-                                ++pi;
-                        }
-                    }
-                    if (!exists)
-                        continue;
-                    if (!type)
-                        check(value > 0, "V10 count cell is zero");
-                    uint32_t bx = narrow(uint64_t(x) + local % w),
-                             by = narrow(uint64_t(y) + local / w);
-                    check(bx < header_.bins(key.chr1, z.unit, z.resolution) &&
-                              by < header_.bins(key.chr2, z.unit, z.resolution) &&
-                              (key.chr1 != key.chr2 || bx <= by) &&
-                              (z.grid ? rotated_block_number(bx, by, z.block_bins, z.columns)
-                                      : narrow(uint64_t(by / z.block_bins) * z.columns +
-                                               bx / z.block_bins)) == ref.number,
-                          "V10 block cell outside matrix");
-                    result.cells.push_back({bx, by, value});
-                    ++emitted;
-                }
-                check(emitted == occupied, "V10 block occupancy mismatch");
+        } else if (rep == 1 || type) {
+            check(flags == 1 && np == (cells + 7) / 8,
+                  "invalid V10 presence bitmap");
+            if (cells % 8)
+                check((positions.data[np - 1] >> (cells % 8)) == 0,
+                      "nonzero V10 bitmap padding");
+            for (uint64_t k = 0; k < cells; ++k)
+                if (positions.data[k / 8] & (1u << (k % 8)))
+                    present.push_back(k);
+            check(present.size() == occupied, "V10 bitmap population mismatch");
+            positions.at = positions.size;
+        } else
+            check(!flags && !np, "dense V10 counts have a presence stream");
+        positions.done();
+        check(rep != 2 || mode == 2, "dense V10 values must use direct mode");
+        auto scalar = [&]() {
+            return type ? uint64_t(values.word()) : values.var();
+        };
+        std::vector<uint64_t> decoded;
+        if (mode == 0)
+            decoded.assign(slots, scalar());
+        else if (mode == 1) {
+            uint64_t def = scalar(), ne = values.var();
+            check(ne && ne < slots && ne <= values.left(),
+                  "invalid V10 exception count");
+            std::vector<uint64_t> ord;
+            uint64_t previous = 0;
+            for (uint64_t k = 0; k < ne; ++k) {
+                uint64_t d = values.var();
+                check(!k || d, "duplicate V10 exception ordinal");
+                previous = k ? plus(previous, d) : d;
+                check(previous < slots, "V10 exception ordinal out of range");
+                ord.push_back(previous);
             }
-            body.done();
-            ++pages;
+            decoded.assign(slots, def);
+            for (auto o : ord) {
+                uint64_t exception = scalar();
+                check(exception != def, "V10 exception equals default");
+                decoded[o] = exception;
+            }
+        } else {
+            decoded.reserve(slots);
+            for (uint64_t k = 0; k < slots; ++k)
+                decoded.push_back(scalar());
         }
+        values.done();
+        uint64_t emitted = 0;
+        size_t pi = 0;
+        for (uint64_t k = 0; k < slots; ++k) {
+            bool exists = true;
+            uint64_t local = rep == 2 ? k : present[k], value = decoded[k];
+            if (rep == 2) {
+                if (!type)
+                    exists = value != 0;
+                else {
+                    exists = pi < present.size() && present[pi] == k;
+                    if (exists)
+                        ++pi;
+                }
+            }
+            if (!exists)
+                continue;
+            if (!type)
+                check(value > 0, "V10 count cell is zero");
+            uint32_t bx = narrow(uint64_t(x) + local % w),
+                     by = narrow(uint64_t(y) + local / w);
+            check(bx < header_.bins(key.chr1, z.unit, z.resolution) &&
+                      by < header_.bins(key.chr2, z.unit, z.resolution) &&
+                      (key.chr1 != key.chr2 || bx <= by) &&
+                      (z.grid ? rotated_block_number(bx, by, z.block_bins,
+                                                     z.columns)
+                              : narrow(uint64_t(by / z.block_bins) * z.columns +
+                                       bx / z.block_bins)) == number,
+                  "V10 block cell outside matrix");
+            result.cells.push_back({bx, by, value});
+            ++emitted;
+        }
+        check(emitted == occupied, "V10 block occupancy mismatch");
     }
-    blob.done();
-    check(pages == z.pages && result.cells.size() == z.occupied, "V10 matrix occupancy mismatch");
-    std::sort(result.cells.begin(), result.cells.end(),
-              [](auto a, auto b) { return std::tie(a.y, a.x) < std::tie(b.y, b.x); });
+    c.done();
+    check(result.cells.size() == z.occupied, "V10 matrix occupancy mismatch");
+    std::sort(result.cells.begin(), result.cells.end(), [](auto a, auto b) {
+        return std::tie(a.y, a.x) < std::tie(b.y, b.x);
+    });
     return result;
 }
 Matrix Reader::matrix(uint32_t chr1, uint32_t chr2, uint8_t unit, uint32_t ri) {

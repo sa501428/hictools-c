@@ -52,9 +52,9 @@ class Reader {
         uint8_t unit = 0, mode = 0, aggregation = 0, type = 0, grid = 0;
         uint32_t resolution = 0, bin = 0, source = UINT32_MAX, block_bins = 0, columns = 0;
         uint64_t occupied = 0;
-        FileLocator page_index;
-        uint64_t page_index_position_field = 0;
-        uint32_t pages = 0, blocks = 0;
+        FileLocator block_index;
+        uint64_t block_index_position_field = 0;
+        uint32_t blocks = 0;
     };
     struct MatrixMeta {
         std::vector<Zoom> zooms;

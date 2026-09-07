@@ -10,6 +10,6 @@ struct AddNormOptions {
     int compression_level = 3;
 };
 // Atomically replaces the V10 file with an equivalent file containing fresh
-// EVI0, NVI0, and NEVI indexes. Matrix pages and metadata are copied unchanged.
+// EVI0, NVI0, and NEVI indexes. Matrix blocks and metadata are copied unchanged.
 void add_norm_v10(const std::string &path, const AddNormOptions &options);
 } // namespace hic10
