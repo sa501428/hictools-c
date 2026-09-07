@@ -228,7 +228,7 @@ void pre(const std::string &input, const std::string &output, const std::string 
     for (auto r : resolutions) {
         check(r > 0 && r <= INT32_MAX, "invalid resolution");
         h.resolutions[0].push_back({r});
-        ev.emplace_back(new ExpectedValueCalculation(genome, static_cast<int>(r)));
+        ev.emplace_back(new ExpectedValueCalculation(genome, static_cast<int>(r), true));
     }
     check(options.threads > 0 && options.threads <= 256, "invalid writer thread count");
     // Declared before the worker pool so it is removed only after every queued

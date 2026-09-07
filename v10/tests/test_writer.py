@@ -51,6 +51,20 @@ def main():
             if straw:
                 assert '100\t200\t2' in run([straw, 'observed', 'NONE', out, 'chr1', 'chr1', 'BP', 100])
                 assert '300\t100\t1' in run([straw, 'observed', 'NONE', out, 'chr2', 'chr1', 'BP', 100])
+        # Native V10 expected values use the same ceil-based terminal-bin
+        # geometry as the matrix. Rebuilding raw expected through addnorm must
+        # therefore be bitwise stable when a chromosome ends in a partial bin.
+        partial_chrom = p/'partial.sizes'
+        partial_chrom.write_text('chr1\t250\n')
+        partial_pairs = p/'partial.txt'
+        partial_pairs.write_text('chr1 0 chr1 200\nchr1 100 chr1 200\n')
+        partial = p/'partial.hic'
+        rebuilt_partial = p/'partial-rebuilt.hic'
+        run([v10, 'pre', '-r', '100', partial_pairs, partial, partial_chrom])
+        original_expected = Hic(partial).vectors[1, None, None, 0, 100]
+        rebuilt_partial.write_bytes(partial.read_bytes())
+        run([v10, 'addnorm', '--no-vc', '--no-vc-sqrt', '--no-scale', rebuilt_partial])
+        assert Hic(rebuilt_partial).vectors[1, None, None, 0, 100] == original_expected
         # Three chromosome pairs exercise bounded parser read-ahead and ordered
         # pair-section consumption. Worker count must not affect file bytes.
         serial_pairs = p/'extra-serial.hic'

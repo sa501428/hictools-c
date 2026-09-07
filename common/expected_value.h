@@ -21,7 +21,10 @@
 
 class ExpectedValueCalculation {
 public:
-    ExpectedValueCalculation(const Genome& genome, int bin_size);
+    // Legacy V9 expected values count only complete bins. V10 uses the format's
+    // ordinary ceil(length / resolution) geometry, including a partial final bin.
+    ExpectedValueCalculation(const Genome& genome, int bin_size,
+                             bool include_partial_bins = false);
 
     // Thread-safe: add a contact at (bin1, bin2) for chromosome chr_idx.
     // Call only for intra-chromosomal contacts (chr1 == chr2).
@@ -45,11 +48,14 @@ public:
 private:
     const Genome&                      genome_;
     int                                bin_size_;
-    int64_t                            n_bins_;         // max chromosome / bin_size + 1
+    bool                               include_partial_bins_;
+    int64_t                            n_bins_;
     std::vector<double>                actual_distances_; // indexed by distance in bins
     std::unordered_map<int, double>    chr_counts_;     // chr_idx → total count
     std::vector<float>                 density_;        // output expected values
     std::unordered_map<int32_t, float> chr_scale_;      // chr_idx → scale factor
     bool                               computed_ = false;
     std::mutex                         mutex_;
+
+    int64_t chromosome_bins(int64_t length) const;
 };

@@ -3,15 +3,24 @@
 #include <cmath>
 #include <stdexcept>
 
-ExpectedValueCalculation::ExpectedValueCalculation(const Genome& genome, int bin_size)
-    : genome_(genome), bin_size_(bin_size) {
-    // Compute max bins needed: max chromosome length / bin_size + 1
+ExpectedValueCalculation::ExpectedValueCalculation(const Genome& genome, int bin_size,
+                                                   bool include_partial_bins)
+    : genome_(genome), bin_size_(bin_size), include_partial_bins_(include_partial_bins) {
     int64_t max_len = 0;
     for (auto* c : genome.chromosomes_without_all()) {
         max_len = std::max(max_len, c->length);
     }
-    n_bins_ = max_len / bin_size + 1;
+    // Preserve the legacy V9 allocation convention. V10 instead uses its exact
+    // ceil-based logical bin count and does not need a redundant terminal slot.
+    n_bins_ = include_partial_bins_ ? chromosome_bins(max_len) : max_len / bin_size_ + 1;
     actual_distances_.assign(n_bins_, 0.0);
+}
+
+int64_t ExpectedValueCalculation::chromosome_bins(int64_t length) const {
+    int64_t bins = length / bin_size_;
+    if (include_partial_bins_ && length % bin_size_ != 0)
+        ++bins;
+    return bins;
 }
 
 void ExpectedValueCalculation::add_distance(int chr_idx, int bin1, int bin2, double weight) {
@@ -39,7 +48,7 @@ void ExpectedValueCalculation::compute_density() {
 
     for (auto* chr : genome_.chromosomes_without_all()) {
         if (chr_counts_.find(chr->index) == chr_counts_.end()) continue;
-        int64_t n_chr_bins = chr->length / bin_size_;
+        int64_t n_chr_bins = chromosome_bins(chr->length);
         max_num_bins = std::max(max_num_bins, n_chr_bins);
         for (int64_t i = 0; i < n_chr_bins && i < n_bins_; i++) {
             possible_distances[i] += (double)(n_chr_bins - i);
@@ -104,7 +113,7 @@ void ExpectedValueCalculation::compute_density() {
     // where expected_total = sum over d of (nChrBins - d) * density_[d]
     for (auto& [chr_idx, observed] : chr_counts_) {
         const Chromosome& chr = genome_.at(chr_idx);
-        int64_t n_chr_bins = chr.length / bin_size_;
+        int64_t n_chr_bins = chromosome_bins(chr.length);
         double expected = 0.0;
         for (int64_t n = 0; n < n_chr_bins && n < (int64_t)density_.size(); n++) {
             expected += (double)(n_chr_bins - n) * density_[n];

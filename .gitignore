@@ -16,3 +16,4 @@ test.txt.gz
 *.zip
 .DS_Store
 /build-v10-review
+/build-v10-asan-review
