@@ -205,7 +205,13 @@ def main():
         run([v9, '-r', '100,200', p/'extra.txt', original, chrom])
         assert struct.unpack_from('<I', original.read_bytes(), 4)[0] == 9
         run([addnorm, '--no-scale', original])
-        run([v10, 'convert', original, converted])
+        run([v10, 'convert', '-t', '1', '--read-ahead', '1', '-T', p,
+             original, converted])
+        parallel_converted = p/'converted-parallel.hic'
+        run([v10, 'convert', '-t', '2', '--read-ahead', '2', '-T', p,
+             original, parallel_converted])
+        assert parallel_converted.read_bytes() == converted.read_bytes()
+        assert not list(p.glob('hic-v10-convert-*'))
         h = Hic(converted)
         assert h.records(1, 1, 100) == expected100
         assert h.records(1, 1, 200) == [(0, 1, 2), (1, 2, 1), (49, 49, 1)]

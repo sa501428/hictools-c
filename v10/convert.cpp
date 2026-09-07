@@ -1,16 +1,80 @@
 #include "format.h"
+#include "common/thread_pool.h"
 #include <algorithm>
 #include <cmath>
+#include <deque>
+#include <dirent.h>
+#include <future>
 #include <memory>
 #include <set>
 #include <sys/stat.h>
 #include <tuple>
+#include <unistd.h>
 #include <zlib.h>
 #include <zstd.h>
 
 namespace hic10 {
 namespace {
 constexpr uint64_t limit = 512ULL * 1024 * 1024;
+struct TempWorkspace {
+    std::string path;
+
+    explicit TempWorkspace(const std::string &directory) {
+        std::string pattern = directory + "/hic-v10-convert-XXXXXX";
+        std::vector<char> name(pattern.begin(), pattern.end());
+        name.push_back(0);
+        check(mkdtemp(name.data()) != nullptr,
+              "cannot create V10 conversion workspace in " + directory);
+        path = name.data();
+    }
+    TempWorkspace(const TempWorkspace &) = delete;
+    TempWorkspace &operator=(const TempWorkspace &) = delete;
+    ~TempWorkspace() {
+        if (path.empty())
+            return;
+        if (DIR *directory = opendir(path.c_str())) {
+            while (dirent *entry = readdir(directory)) {
+                std::string name = entry->d_name;
+                if (name != "." && name != "..")
+                    std::remove((path + "/" + name).c_str());
+            }
+            closedir(directory);
+        }
+        rmdir(path.c_str());
+    }
+};
+struct Spool {
+    FILE *file = nullptr;
+    std::string path;
+    explicit Spool(const std::string &directory) {
+        std::string pattern = directory + "/hic-v10-matrix-XXXXXX";
+        std::vector<char> name(pattern.begin(), pattern.end());
+        name.push_back(0);
+        int fd = mkstemp(name.data());
+        check(fd >= 0, "cannot create conversion matrix spool");
+        path = name.data();
+        file = fdopen(fd, "w+b");
+        if (!file) {
+            ::close(fd);
+            std::remove(path.c_str());
+            throw std::runtime_error("V10: cannot open conversion matrix spool");
+        }
+    }
+    ~Spool() {
+        if (file)
+            std::fclose(file);
+        if (!path.empty())
+            std::remove(path.c_str());
+    }
+    void close() {
+        if (!file)
+            return;
+        check(std::fflush(file) == 0, "cannot flush conversion matrix spool");
+        auto current = file;
+        file = nullptr;
+        check(std::fclose(current) == 0, "cannot close conversion matrix spool");
+    }
+};
 class Input {
     FILE *f_;
     uint64_t end_;
@@ -226,6 +290,75 @@ std::vector<Cell> decode(Input &f, const Block &block) {
     check(cells.size() == size_t(n) && c.at == bytes.size(),
           "V9 block length/record count mismatch");
     return cells;
+}
+struct PreparedRange {
+    uint64_t offset = 0, cells = 0;
+    bool scores = false;
+};
+struct PreparedMatrix {
+    uint32_t a = 0, b = 0;
+    std::shared_ptr<Spool> spool;
+    std::array<std::vector<PreparedRange>, 2> ranges;
+};
+void writeCell(FILE *file, const Cell &cell) {
+    unsigned char bytes[16];
+    const uint64_t fields[3] = {cell.x, cell.y, cell.value};
+    const unsigned widths[3] = {4, 4, 8};
+    size_t at = 0;
+    for (unsigned field = 0; field < 3; ++field)
+        for (unsigned lane = 0; lane < widths[field]; ++lane)
+            bytes[at++] = static_cast<unsigned char>(fields[field] >> (8 * lane));
+    check(std::fwrite(bytes, 1, sizeof(bytes), file) == sizeof(bytes),
+          "cannot write conversion matrix spool");
+}
+Cell readCell(FILE *file) {
+    unsigned char bytes[16];
+    check(std::fread(bytes, 1, sizeof(bytes), file) == sizeof(bytes),
+          "truncated conversion matrix spool");
+    auto field = [&](unsigned at, unsigned width) {
+        uint64_t value = 0;
+        for (unsigned i = 0; i < width; ++i)
+            value |= uint64_t(bytes[at + i]) << (8 * i);
+        return value;
+    };
+    return {static_cast<uint32_t>(field(0, 4)), static_cast<uint32_t>(field(4, 4)),
+            field(8, 8)};
+}
+PreparedMatrix prepareMatrix(const std::string &input, LegacyMatrix matrix, const Header &header,
+                             const Options &options, const std::string &directory) {
+    Input f(input);
+    PreparedMatrix prepared;
+    prepared.a = matrix.a;
+    prepared.b = matrix.b;
+    prepared.spool = std::make_shared<Spool>(directory);
+    for (uint8_t unit = 0; unit < 2; ++unit) {
+        prepared.ranges[unit].resize(header.resolutions[unit].size());
+        for (uint32_t ri = 0; ri < header.resolutions[unit].size(); ++ri) {
+            auto offset = ftello(prepared.spool->file);
+            check(offset >= 0, "cannot determine conversion matrix spool position");
+            auto &range = prepared.ranges[unit][ri];
+            range.offset = static_cast<uint64_t>(offset);
+            range.scores = options.scores;
+            const uint32_t bin = header.resolutions[unit][ri].bin;
+            for (const auto &zoom : matrix.zooms) {
+                if (zoom.unit != unit || zoom.bin != bin)
+                    continue;
+                for (const auto &block : zoom.blocks) {
+                    auto cells = decode(f, block);
+                    for (const auto &cell : cells) {
+                        float value = floating(static_cast<uint32_t>(cell.value));
+                        if (!std::isfinite(value) || value <= 0 || std::floor(value) != value ||
+                            double(value) >= std::ldexp(1.0, 64))
+                            range.scores = true;
+                        writeCell(prepared.spool->file, cell);
+                        range.cells = plus(range.cells, 1);
+                    }
+                }
+            }
+        }
+    }
+    prepared.spool->close();
+    return prepared;
 }
 struct LegacyVector {
     Vector vector;
@@ -456,32 +589,53 @@ void convert(const std::string &input, const std::string &output, const Options 
     vectors.reserve(legacyVectors.size());
     for (auto &legacy : legacyVectors)
         vectors.push_back(std::move(legacy.vector));
-    Writer writer(output, h, options);
-    for (const auto &m : matrices) {
-        std::fprintf(stderr, "Converting %s x %s\n", h.chromosomes[m.a].name.c_str(),
-                     h.chromosomes[m.b].name.c_str());
-        writer.matrix(m.a, m.b, [&](uint8_t u, uint32_t ri) {
+    check(options.threads > 0 && options.threads <= 256, "invalid writer thread count");
+    const size_t readAhead = options.readAhead ? options.readAhead : options.threads;
+    check(readAhead > 0 && readAhead <= 256,
+          "invalid chromosome-pair read-ahead count");
+    // Keep the workspace alive until after the pool has joined every worker.
+    TempWorkspace workspace(options.tmpDir);
+    auto pool = std::make_shared<ThreadPool>(options.threads);
+    Writer writer(output, h, options, pool);
+    std::deque<std::future<PreparedMatrix>> pending;
+    auto consume = [&]() {
+        PreparedMatrix prepared = pending.front().get();
+        pending.pop_front();
+        std::unique_ptr<FILE, decltype(&fclose)> spool(
+            std::fopen(prepared.spool->path.c_str(), "rb"), &fclose);
+        check(bool(spool), "cannot reopen conversion matrix spool");
+        std::fprintf(stderr, "Writing %s x %s\n", h.chromosomes[prepared.a].name.c_str(),
+                     h.chromosomes[prepared.b].name.c_str());
+        writer.matrix(prepared.a, prepared.b, [&](uint8_t unit, uint32_t ri) {
+            check(unit < prepared.ranges.size() && ri < prepared.ranges[unit].size(),
+                  "invalid prepared conversion matrix range");
+            const auto range = prepared.ranges[unit][ri];
+            check(range.cells <= std::numeric_limits<size_t>::max(),
+                  "prepared conversion matrix is too large for this platform");
+            check(fseeko(spool.get(), static_cast<off_t>(range.offset), SEEK_SET) == 0,
+                  "cannot seek conversion matrix spool");
             Matrix result;
-            result.scores = options.scores;
-            uint32_t bin = h.resolutions[u][ri].bin;
-            for (const auto &z : m.zooms)
-                if (z.unit == u && z.bin == bin)
-                    for (const auto &b : z.blocks) {
-                        auto cells = decode(f, b);
-                        for (auto c : cells) {
-                            float v = floating(static_cast<uint32_t>(c.value));
-                            if (!std::isfinite(v) || v <= 0 || std::floor(v) != v ||
-                                double(v) >= std::ldexp(1.0, 64))
-                                result.scores = true;
-                            result.cells.push_back(c);
-                        }
-                    }
+            result.scores = range.scores;
+            result.cells.reserve(static_cast<size_t>(range.cells));
+            for (uint64_t i = 0; i < range.cells; ++i)
+                result.cells.push_back(readCell(spool.get()));
             if (!result.scores)
-                for (auto &c : result.cells)
-                    c.value = static_cast<uint64_t>(floating(static_cast<uint32_t>(c.value)));
+                for (auto &cell : result.cells)
+                    cell.value =
+                        static_cast<uint64_t>(floating(static_cast<uint32_t>(cell.value)));
             return result;
         });
+    };
+    for (auto &matrix : matrices) {
+        pending.push_back(pool->submit(
+            [input, matrix = std::move(matrix), &h, options, directory = workspace.path]() mutable {
+                return prepareMatrix(input, std::move(matrix), h, options, directory);
+            }));
+        if (pending.size() >= readAhead)
+            consume();
     }
+    while (!pending.empty())
+        consume();
     writer.finish(vectors);
 }
 } // namespace hic10

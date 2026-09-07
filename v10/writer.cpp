@@ -147,6 +147,13 @@ struct EncodedBlock {
     Bytes stored;
 };
 
+struct EncodedVectorChunk {
+    uint64_t begin;
+    uint32_t count;
+    uint8_t transform;
+    Bytes stored;
+};
+
 EncodedBlock encode_block(uint32_t number, Bytes payload, int level) {
     EncodedBlock result{number, {}};
     magic(result.stored, "H10B");
@@ -157,6 +164,36 @@ EncodedBlock encode_block(uint32_t number, Bytes payload, int level) {
     put(result.stored, number, 4);
     append(result.stored, compressed(payload, level));
     return result;
+}
+EncodedVectorChunk encode_vector_chunk(uint64_t begin, std::vector<uint32_t> words, int level) {
+    const uint32_t count = narrow(words.size());
+    Bytes best;
+    uint8_t transform = 0;
+    for (uint8_t candidate = 0; candidate < 3; ++candidate) {
+        Bytes raw;
+        raw.reserve(uint64_t(count) * 4);
+        if (candidate == 1)
+            for (unsigned lane = 0; lane < 4; ++lane)
+                for (uint32_t j = 0; j < count; ++j)
+                    put(raw, words[j] >> (8 * lane), 1);
+        else
+            for (uint32_t j = 0; j < count; ++j)
+                put(raw, words[j] ^ (candidate == 2 && j ? words[j - 1] : 0), 4);
+        auto frame = compressed(raw, level);
+        if (best.empty() || frame.size() < best.size()) {
+            best = std::move(frame);
+            transform = candidate;
+        }
+    }
+    Bytes stored;
+    magic(stored, "H10V");
+    put(stored, 1, 1);
+    put(stored, transform, 1);
+    put(stored, 0, 2);
+    put(stored, uint64_t(count) * 4, 4);
+    put(stored, count, 4);
+    append(stored, best);
+    return {begin, count, transform, std::move(stored)};
 }
 void canonical(Matrix &m, uint32_t a, uint32_t b, const Header &h, uint8_t u, uint32_t ri) {
     for (auto c : m.cells)
@@ -518,6 +555,20 @@ void Writer::finish(const std::vector<Vector> &vectors) {
             constexpr uint32_t nominal = 65536;
             check(ceil_div(valueCount, nominal) <= UINT32_MAX,
                   "vector needs too many V10 chunks");
+            std::deque<std::future<EncodedVectorChunk>> queued;
+            auto consume = [&]() {
+                EncodedVectorChunk encoded = queued.front().get();
+                queued.pop_front();
+                auto pos = write(encoded.stored);
+                put(chunks, encoded.begin, 8);
+                put(chunks, encoded.count, 4);
+                put(chunks, encoded.transform, 1);
+                put(chunks, 1, 1);
+                put(chunks, 0, 2);
+                put(chunks, pos, 8);
+                put(chunks, narrow(encoded.stored.size()), 4);
+                put(chunks, uint64_t(encoded.count) * 4, 4);
+            };
             for (uint64_t begin = 0; begin < valueCount; begin += nominal) {
                 uint32_t n = narrow(std::min<uint64_t>(nominal, valueCount - begin));
                 std::vector<uint32_t> words;
@@ -526,42 +577,15 @@ void Writer::finish(const std::vector<Vector> &vectors) {
                 else
                     words.assign(v.values.begin() + begin, v.values.begin() + begin + n);
                 check(words.size() == n, "vector loader returned the wrong length");
-                Bytes best;
-                uint8_t transform = 0;
-                for (uint8_t t = 0; t < 3; ++t) {
-                    Bytes raw;
-                    raw.reserve(uint64_t(n) * 4);
-                    if (t == 1)
-                        for (unsigned lane = 0; lane < 4; ++lane)
-                            for (uint32_t j = 0; j < n; ++j)
-                                put(raw, words[j] >> (8 * lane), 1);
-                    else
-                        for (uint32_t j = 0; j < n; ++j)
-                            put(raw, words[j] ^ (t == 2 && j ? words[j - 1] : 0), 4);
-                    auto frame = compressed(raw, options_.level);
-                    if (best.empty() || frame.size() < best.size()) {
-                        best = std::move(frame);
-                        transform = t;
-                    }
-                }
-                Bytes stored;
-                magic(stored, "H10V");
-                put(stored, 1, 1);
-                put(stored, transform, 1);
-                put(stored, 0, 2);
-                put(stored, uint64_t(n) * 4, 4);
-                put(stored, n, 4);
-                append(stored, best);
-                auto pos = write(stored);
-                put(chunks, begin, 8);
-                put(chunks, n, 4);
-                put(chunks, transform, 1);
-                put(chunks, 1, 1);
-                put(chunks, 0, 2);
-                put(chunks, pos, 8);
-                put(chunks, narrow(stored.size()), 4);
-                put(chunks, uint64_t(n) * 4, 4);
+                queued.push_back(pool_->submit([begin, words = std::move(words),
+                                                level = options_.level]() mutable {
+                    return encode_vector_chunk(begin, std::move(words), level);
+                }));
+                if (queued.size() >= options_.threads)
+                    consume();
             }
+            while (!queued.empty())
+                consume();
             Bytes entry;
             put(entry, 0, 4);
             if (kind != 1)

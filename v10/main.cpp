@@ -18,14 +18,14 @@ static void usage() {
            "  --block-bins N     Additional minimum logical block width (max 4096)\n"
            "  --derive T:S       Add a nonstandard derived BP resolution; repeatable\n"
            "                     20/50/200/500/2000 BP are always derived; 500 kb is stored\n"
-           "  --scores           Force SCORE_FLOAT32, even for integral values\n\n"
+           "  --scores           Force SCORE_FLOAT32, even for integral values\n"
+           "  -T DIR             Run-scoped spool parent; automatically cleaned (default /tmp)\n"
+           "  --read-ahead N     Maximum outstanding chromosome pairs (default: -t)\n\n"
            "Pre options (same parsers and MAPQ filtering as hic_pre):\n"
            "  -r N,N,...         BP resolutions (default: existing V9 resolution set)\n"
            "  -q N               Minimum MAPQ (default 0)\n"
            "  -f FORMAT          auto|pairs|short|mnd|bin|bn|hbs\n"
            "  -g GENOME          Genome ID stored in header\n"
-           "  -T DIR             Run-scoped spool parent; automatically cleaned (default /tmp)\n"
-           "  --read-ahead N     Maximum outstanding chromosome pairs (default: -t)\n"
            "  --intra            Retain cis contacts only\n"
            "  --near-diag        Discard cis contacts beyond 10 Mb\n"
            "\nAddnorm options (V10 file is replaced atomically in place):\n"
@@ -94,6 +94,20 @@ int main(int argc, char **argv) {
                 auto colon = s.find(':');
                 hic10::check(colon != std::string::npos, "--derive needs target:source");
                 opts.derived.emplace_back(number(s.substr(0, colon)), number(s.substr(colon + 1)));
+            } else if (command != "addnorm" && arg == "-T") {
+                auto directory = value();
+                if (command == "pre")
+                    pre.tmpDir = directory;
+                else
+                    opts.tmpDir = directory;
+            } else if (command != "addnorm" && arg == "--read-ahead") {
+                auto n = number(value());
+                hic10::check(n > 0 && n <= 256,
+                             "read-ahead count must be between 1 and 256");
+                if (command == "pre")
+                    pre.readAhead = n;
+                else
+                    opts.readAhead = n;
             } else if (command == "pre" && arg == "-r") {
                 std::istringstream in(value());
                 std::string s;
@@ -104,15 +118,7 @@ int main(int argc, char **argv) {
                 auto n = number(value());
                 hic10::check(n <= INT_MAX, "MAPQ too large");
                 pre.mapq = n;
-            } else if (command == "pre" && arg == "-T")
-                pre.tmpDir = value();
-            else if (command == "pre" && arg == "--read-ahead") {
-                auto n = number(value());
-                hic10::check(n > 0 && n <= 256,
-                             "read-ahead count must be between 1 and 256");
-                pre.readAhead = n;
-            }
-            else if (command == "pre" && arg == "-g")
+            } else if (command == "pre" && arg == "-g")
                 pre.genome = value();
             else if (command == "pre" && arg == "--intra")
                 pre.intra = true;

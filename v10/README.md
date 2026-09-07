@@ -114,6 +114,10 @@ fills the NVI locator. This repack is staged in the same atomic temporary file.
 
 ```sh
 build/hic_v10 convert input.v9.hic output.v10.hic
+
+# Bound preparation to two chromosome pairs while using eight workers.
+build/hic_v10 convert -t 8 --read-ahead 2 -T /local/scratch \
+  input.v9.hic output.v10.hic
 ```
 
 Conversion preserves chromosome order and lengths, genome ID, unknown attributes
@@ -188,11 +192,15 @@ BYTE_SHUFFLE, and XOR32 vector transforms. Each logical block is stored as one
 `H10B` record with its own Zstandard frame. An `H10I` version-2 index stores the
 exact block number, stored length, and absolute position for every block. Defaults
 are a 256-bin minimum block scale, four workers, Zstandard level 6, and 65,536
-values per vector chunk. Use `-t N` with `pre` to bound pair preparation and block
-compression together; with `convert`, it controls block compression. Use
-`--read-ahead N` when pair accumulators are large and their concurrency needs a
-tighter memory bound. At most `-t` encoded logical blocks are queued for ordered
-output in addition to active pair accumulators.
+values per vector chunk. With both `pre` and `convert`, `-t N` controls the shared
+chromosome-pair preparation and block-compression worker pool. Conversion workers
+decode independent V9 chromosome pairs into run-scoped matrix spools beneath
+`-T DIR`; the ordered writer reads one resolution at a time while later pairs are
+prepared in parallel. `--read-ahead N` bounds the number of prepared or active
+pair spools (default `-t`), allowing disk usage and concurrent decoding memory to
+be reduced independently of compression parallelism. At most `-t` encoded logical
+blocks are queued for ordered output. The private spool workspace is removed on
+success and ordinary error exits.
 The 256-bin block scale is only a lower bound. The V9 adaptive sizing formula
 increases it sharply as resolution becomes finer—hg38 chr1 uses roughly 50,000
 bins per rotated cis block at 10 bp—and increases it further if a `u32` block

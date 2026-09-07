@@ -217,7 +217,9 @@ struct Vector {
 struct Options {
     int level = 6;
     uint32_t threads = 4;
+    uint32_t readAhead = 0; // converter: 0 uses threads
     uint32_t blockBins = 256;
+    std::string tmpDir = "/tmp";
     std::vector<std::pair<uint32_t, uint32_t>> derived;
     bool scores = false, verifyDerived = true;
 };
