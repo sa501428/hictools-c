@@ -283,6 +283,10 @@ def main():
                             assert fixture.vectors[2, 'VC', None, 1, 1]
                         if straw:
                             assert len(run([straw, 'observed', 'NONE', target, 'chr1', 'chr1', 'FRAG', 1]).splitlines()) == 3
+        endpoint_v9, endpoint_v10 = p/'endpoint.v9.hic', p/'endpoint.v10.hic'
+        endpoint_expected, _ = v9_fixture(endpoint_v9, endpoint=True)
+        run([v10, 'convert', endpoint_v9, endpoint_v10])
+        assert Hic(endpoint_v10).records(0, 0, 10) == endpoint_expected
         # Many independent blocks exercise exact indexing and parallel compression.
         bigchrom = p/'big.sizes'
         bigchrom.write_text('chr1\t1000000000\nchr2\t1000000000\n')

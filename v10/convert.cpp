@@ -340,21 +340,96 @@ PreparedMatrix prepareMatrix(const std::string &input, LegacyMatrix matrix, cons
             range.offset = static_cast<uint64_t>(offset);
             range.scores = options.scores;
             const uint32_t bin = header.resolutions[unit][ri].bin;
+            const uint64_t columnLength = unit ? header.chromosomes[matrix.a].sites.size() + 1
+                                               : header.chromosomes[matrix.a].length;
+            const uint64_t rowLength = unit ? header.chromosomes[matrix.b].sites.size() + 1
+                                            : header.chromosomes[matrix.b].length;
+            const uint64_t columns = header.bins(matrix.a, unit, ri);
+            const uint64_t rows = header.bins(matrix.b, unit, ri);
+            uint64_t migratedEndpoints = 0;
+            struct BoundaryCell {
+                Cell cell{};
+                std::vector<uint32_t> values;
+                bool migrated = false;
+            };
+            std::map<std::pair<uint32_t, uint32_t>, BoundaryCell> boundary;
+            auto classify = [&](uint32_t word) {
+                float value = floating(word);
+                if (!std::isfinite(value) || value <= 0 || std::floor(value) != value ||
+                    double(value) >= std::ldexp(1.0, 64))
+                    range.scores = true;
+            };
+            auto store = [&](const Cell &cell) {
+                writeCell(prepared.spool->file, cell);
+                range.cells = plus(range.cells, 1);
+            };
             for (const auto &zoom : matrix.zooms) {
                 if (zoom.unit != unit || zoom.bin != bin)
                     continue;
                 for (const auto &block : zoom.blocks) {
                     auto cells = decode(f, block);
-                    for (const auto &cell : cells) {
-                        float value = floating(static_cast<uint32_t>(cell.value));
-                        if (!std::isfinite(value) || value <= 0 || std::floor(value) != value ||
-                            double(value) >= std::ldexp(1.0, 64))
-                            range.scores = true;
-                        writeCell(prepared.spool->file, cell);
-                        range.cells = plus(range.cells, 1);
+                    for (auto cell : cells) {
+                        // V9 permits floor(length / bin) as a coordinate. When
+                        // the division is exact, that is a redundant endpoint
+                        // bin outside V10's half-open ceil(length / bin) grid.
+                        // Treat it as a legacy 1-based endpoint and fold it into
+                        // the final real bin. Anything farther out remains an
+                        // error in Writer::canonical.
+                        bool migrated = false;
+                        if (cell.x == columns && columnLength % bin == 0) {
+                            --cell.x;
+                            ++migratedEndpoints;
+                            migrated = true;
+                        }
+                        if (cell.y == rows && rowLength % bin == 0) {
+                            --cell.y;
+                            ++migratedEndpoints;
+                            migrated = true;
+                        }
+                        classify(static_cast<uint32_t>(cell.value));
+                        // Defer the final row/column when it could receive a
+                        // folded endpoint. This bounds extra memory to the
+                        // chromosome edge and lets endpoint-induced duplicates
+                        // be combined without buffering the full resolution.
+                        bool terminal =
+                            (columnLength % bin == 0 && uint64_t(cell.x) + 1 == columns) ||
+                            (rowLength % bin == 0 && uint64_t(cell.y) + 1 == rows);
+                        if (terminal) {
+                            auto &pending = boundary[{cell.x, cell.y}];
+                            pending.cell = cell;
+                            pending.values.push_back(static_cast<uint32_t>(cell.value));
+                            pending.migrated = pending.migrated || migrated;
+                        } else
+                            store(cell);
                     }
                 }
             }
+            uint64_t mergedEndpoints = 0;
+            for (auto &[coordinate, pending] : boundary) {
+                if (pending.migrated && pending.values.size() > 1) {
+                    float sum = 0;
+                    for (uint32_t value : pending.values)
+                        sum += floating(value);
+                    pending.cell.value = bits(sum);
+                    classify(static_cast<uint32_t>(pending.cell.value));
+                    mergedEndpoints = plus(mergedEndpoints, pending.values.size() - 1);
+                    store(pending.cell);
+                } else
+                    for (uint32_t value : pending.values) {
+                        pending.cell.value = value;
+                        store(pending.cell);
+                    }
+            }
+            if (migratedEndpoints)
+                std::fprintf(stderr,
+                             "Migrated %llu legacy endpoint coordinate%s in %s x %s %s %u"
+                             " (%llu collision%s merged)\n",
+                             static_cast<unsigned long long>(migratedEndpoints),
+                             migratedEndpoints == 1 ? "" : "s",
+                             header.chromosomes[matrix.a].name.c_str(),
+                             header.chromosomes[matrix.b].name.c_str(), unit ? "FRAG" : "BP",
+                             bin, static_cast<unsigned long long>(mergedEndpoints),
+                             mergedEndpoints == 1 ? "" : "s");
         }
     }
     prepared.spool->close();

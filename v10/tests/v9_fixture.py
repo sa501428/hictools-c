@@ -5,16 +5,26 @@ import zlib
 def p(fmt, *args): return struct.pack('<'+fmt, *args)
 def s(value): return value.encode()+b'\0'
 
-def make(path, x_int=False, y_int=False, floating=False, dense=False, frag=False):
+def make(path, x_int=False, y_int=False, floating=False, dense=False, frag=False,
+         endpoint=False):
     header = bytearray(b'HIC\0'+p('IQ', 9, 0)+s('fixture'))
     nvi_patch = len(header); header += bytes(16)
     header += p('I', 2)+s('unknown')+s('first')+s('unknown')+s('second')
-    header += p('I', 1)+s('chr1')+p('Q', 80)+p('II', 1, 10)
+    header += p('I', 1)+s('chr1')+p('Q', 20 if endpoint else 80)+p('II', 1, 10)
     header += p('I', int(frag))
     if frag: header += p('I', 1)+p('I', 7)+b''.join(p('I', i) for i in range(5, 66, 10))
     data = header
     values = [1.25, -0.0, 2.5] if floating else [1, 2, 300]
-    if dense:
+    if endpoint:
+        # V9's floor(length / bin) + 1 geometry admits bin 2 for length 20
+        # at resolution 10. V10 has two bins (0 and 1), so conversion folds
+        # this legacy 1-based endpoint into bin 1.
+        raw = p('iii4B', 2, 0, 0, 0, 0, 0, 1)
+        raw += p('h', 2)
+        raw += p('h', 1)+p('h', 1)+p('h', 0)+p('h', 3)
+        raw += p('h', 2)+p('h', 1)+p('h', 0)+p('h', 7)
+        expected = [(0, 1, 10)]
+    elif dense:
         # 2 rows x 3 columns: cells 0, 2 and 4 are present.
         raw = p('iii4Bih', 3, 0, 0, int(floating), int(x_int), int(y_int), 2, 6, 3)
         raw += b''.join(p('f' if floating else 'h', v) for v in [values[0], float('nan') if floating else -32768, values[1], float('nan') if floating else -32768, values[2], float('nan') if floating else -32768])

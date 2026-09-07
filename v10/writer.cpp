@@ -196,10 +196,18 @@ EncodedVectorChunk encode_vector_chunk(uint64_t begin, std::vector<uint32_t> wor
     return {begin, count, transform, std::move(stored)};
 }
 void canonical(Matrix &m, uint32_t a, uint32_t b, const Header &h, uint8_t u, uint32_t ri) {
-    for (auto c : m.cells)
-        check(c.x < h.bins(a, u, ri) && c.y < h.bins(b, u, ri) && (a != b || c.x <= c.y) &&
-                  (m.scores ? c.value <= UINT32_MAX : c.value > 0),
-              "invalid input cell");
+    const uint64_t columns = h.bins(a, u, ri), rows = h.bins(b, u, ri);
+    for (auto c : m.cells) {
+        const bool valid = c.x < columns && c.y < rows && (a != b || c.x <= c.y) &&
+                           (m.scores ? c.value <= UINT32_MAX : c.value > 0);
+        check(valid, "invalid input cell at " + std::to_string(c.x) + "," +
+                         std::to_string(c.y) + " for " + h.chromosomes[a].name + " x " +
+                         h.chromosomes[b].name + " " + std::to_string(columns) + "x" +
+                         std::to_string(rows) + " matrix (unit " + std::to_string(u) +
+                         ", resolution " + std::to_string(h.resolutions[u][ri].bin) +
+                         ", value " + std::to_string(c.value) +
+                         (m.scores ? ", scores)" : ", counts)"));
+    }
     std::sort(m.cells.begin(), m.cells.end(),
               [](const Cell &a, const Cell &b) { return std::tie(a.y, a.x) < std::tie(b.y, b.x); });
     for (size_t i = 1; i < m.cells.size(); ++i)

@@ -158,8 +158,11 @@ hictools.v9.vector.<kind>.<norm-id>.<chr-id>.<unit>.<resolution-index>
 Kinds are `0` normalization, `1` raw expected, and `2` normalized expected. IDs
 refer to the output header; fields unused by a kind are zero. This migration
 metadata preserves the original words, but the advertised V10 vector lengths
-follow V10 semantics. Unsupported/malformed input, out-of-range contacts, and
-arithmetic overflow produce errors.
+follow V10 semantics. A contact in V9's redundant terminal bin (present when
+chromosome length is exactly divisible by the resolution) is folded into the
+final V10 bin; this migrates legacy 1-based endpoint coordinates to V10's
+half-open geometry. Contacts farther outside the chromosome,
+unsupported/malformed input, and arithmetic overflow produce errors.
 
 ## Derived resolutions
 
