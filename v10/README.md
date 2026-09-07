@@ -137,6 +137,10 @@ V9 commonly stores `floor(length / resolution) + 1` normalization bins; V10
 requires `ceil(length / resolution)`. V9 expected arrays may also be shorter than
 the full distance range required by V10.
 
+The converter reads these arrays directly from the V9 file in V10-sized chunks.
+Their total size is therefore not part of peak memory use; this is important for
+files carrying chromosome-length normalization and expected arrays at 1 bp.
+
 The converter preserves all overlapping words exactly, including signed zeros
 and NaN payloads. It fills newly addressable entries with canonical NaNs, and
 moves any surplus terminal words into ordered header attributes rather than

@@ -205,7 +205,14 @@ struct Vector {
     uint8_t kind = 0, unit = 0; // 0 normalization, 1 expected, 2 normalized expected
     uint32_t norm = 0, chr = 0, ri = 0;
     std::vector<uint32_t> values; // preserve every f32 bit, including NaN payloads
+    // Conversion can reference very large V9 vectors without retaining all of
+    // them in memory. Native V10 producers leave loader empty and use values.
+    uint64_t streamed_values = 0;
+    std::function<std::vector<uint32_t>(uint64_t, uint32_t)> loader;
     std::map<uint32_t, uint32_t> scales;
+    uint64_t value_count() const {
+        return loader ? streamed_values : values.size();
+    }
 };
 struct Options {
     int level = 6;

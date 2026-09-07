@@ -67,6 +67,16 @@ class Input {
     uint64_t wide() {
         return integer(8);
     }
+    std::vector<uint32_t> words(uint64_t pos, uint32_t count) {
+        interval(pos, uint64_t(count) * 4);
+        seek(pos);
+        auto bytes = read(uint64_t(count) * 4);
+        std::vector<uint32_t> result(count);
+        for (uint32_t i = 0; i < count; ++i)
+            for (unsigned j = 0; j < 4; ++j)
+                result[i] |= uint32_t(bytes[uint64_t(i) * 4 + j]) << (8 * j);
+        return result;
+    }
     uint32_t count(uint32_t minBytes = 1) {
         auto n = word();
         check(n <= INT32_MAX && n <= left() / minBytes, "invalid V9 count");
@@ -217,27 +227,46 @@ std::vector<Cell> decode(Input &f, const Block &block) {
           "V9 block length/record count mismatch");
     return cells;
 }
-void fitVector(Header &h, Vector &v) {
+struct LegacyVector {
+    Vector vector;
+    uint64_t position = 0, count = 0;
+};
+void fitVector(Input &f, Header &h, LegacyVector &legacy) {
+    auto &v = legacy.vector;
     uint64_t n = v.kind == 0 ? h.bins(v.chr, v.unit, v.ri) : 0;
     if (v.kind)
         for (uint32_t c = 0; c < h.chromosomes.size(); ++c)
             n = std::max(n, h.bins(c, v.unit, v.ri));
-    check(n <= limit / 4, "vector exceeds allocation limit");
-    if (n != v.values.size()) {
+    if (n != legacy.count) {
         // V9 commonly has a redundant terminal normalization bin or a shorter
         // expected array. Record original length and all surplus words, then
         // fill newly addressable distances with NaNs rather than invent values.
-        std::string value = std::to_string(v.values.size()) + ":";
+        std::string value = std::to_string(legacy.count) + ":";
         const char *hex = "0123456789abcdef";
-        for (uint64_t i = n; i < v.values.size(); ++i)
-            for (unsigned j = 0; j < 8; ++j)
-                value.push_back(hex[(v.values[i] >> (28 - 4 * j)) & 15]);
+        for (uint64_t begin = n; begin < legacy.count;) {
+            uint32_t count = narrow(std::min<uint64_t>(65536, legacy.count - begin));
+            auto words = f.words(plus(legacy.position, begin * 4), count);
+            for (auto word : words)
+                for (unsigned j = 0; j < 8; ++j)
+                    value.push_back(hex[(word >> (28 - 4 * j)) & 15]);
+            begin += count;
+        }
         h.attributes.emplace_back("hictools.v9.vector." + std::to_string(v.kind) + "." +
                                       std::to_string(v.norm) + "." + std::to_string(v.chr) + "." +
                                       std::to_string(v.unit) + "." + std::to_string(v.ri),
                                   value);
-        v.values.resize(n, 0x7fc00000);
     }
+    const uint64_t sourcePosition = legacy.position, sourceCount = legacy.count;
+    v.streamed_values = n;
+    v.loader = [&f, sourcePosition, sourceCount](uint64_t begin, uint32_t count) {
+        std::vector<uint32_t> result(count, 0x7fc00000);
+        if (begin >= sourceCount)
+            return result;
+        uint32_t available = narrow(std::min<uint64_t>(count, sourceCount - begin));
+        auto source = f.words(plus(sourcePosition, begin * 4), available);
+        std::copy(source.begin(), source.end(), result.begin());
+        return result;
+    };
 }
 } // namespace
 void convert(const std::string &input, const std::string &output, const Options &options) {
@@ -302,28 +331,30 @@ void convert(const std::string &input, const std::string &output, const Options 
         f.interval(e.pos, e.size);
         entries.push_back(e);
     }
-    std::vector<Vector> vectors;
+    std::vector<LegacyVector> legacyVectors;
     // Initially record bin sizes in ri; remap after collecting legacy All zooms.
     auto expected = [&](bool normalized) {
         uint32_t count = f.count(normalized ? 21 : 19);
         for (uint32_t i = 0; i < count; ++i) {
-            Vector v;
+            LegacyVector legacy;
+            auto &v = legacy.vector;
             v.kind = normalized ? 2 : 1;
             if (normalized)
                 v.norm = normId(h, f.string());
             v.unit = unitId(f.string());
             v.ri = f.word();
             uint64_t nv = f.wide();
-            check(nv <= f.left() / 4 && nv <= limit / 4, "invalid V9 expected length");
-            for (uint64_t j = 0; j < nv; ++j)
-                v.values.push_back(f.word());
+            check(nv <= f.left() / 4, "invalid V9 expected length");
+            legacy.position = f.position();
+            legacy.count = nv;
+            f.seek(plus(legacy.position, nv * 4));
             uint32_t ns = f.count(8);
             for (uint32_t j = 0; j < ns; ++j) {
                 uint32_t chr = f.word(), value = f.word();
                 check(chr < h.chromosomes.size() && v.scales.emplace(chr, value).second,
                       "duplicate/invalid V9 scale");
             }
-            vectors.push_back(std::move(v));
+            legacyVectors.push_back(std::move(legacy));
         }
     };
     expected(false);
@@ -336,20 +367,21 @@ void convert(const std::string &input, const std::string &output, const Options 
     f.seek(nvi);
     n = f.count(26);
     struct Norm {
-        Vector vector;
+        LegacyVector legacy;
         uint64_t pos, len;
     };
     std::vector<Norm> norms;
     for (uint32_t i = 0; i < n; ++i) {
         Norm nv;
-        nv.vector.kind = 0;
-        nv.vector.norm = normId(h, f.string());
-        nv.vector.chr = f.word();
-        nv.vector.unit = unitId(f.string());
-        nv.vector.ri = f.word();
+        nv.legacy.vector.kind = 0;
+        nv.legacy.vector.norm = normId(h, f.string());
+        nv.legacy.vector.chr = f.word();
+        nv.legacy.vector.unit = unitId(f.string());
+        nv.legacy.vector.ri = f.word();
         nv.pos = f.wide();
         nv.len = f.wide();
-        check(nv.vector.chr < h.chromosomes.size() && nv.len >= 8, "invalid V9 norm vector");
+        check(nv.legacy.vector.chr < h.chromosomes.size() && nv.len >= 8,
+              "invalid V9 norm vector");
         f.interval(nv.pos, nv.len);
         norms.push_back(std::move(nv));
     }
@@ -358,10 +390,11 @@ void convert(const std::string &input, const std::string &output, const Options 
     for (auto &nv : norms) {
         f.seek(nv.pos);
         auto count = f.wide();
-        check(count <= limit / 4 && plus(8, count * 4) == nv.len, "V9 norm vector length mismatch");
-        for (uint64_t j = 0; j < count; ++j)
-            nv.vector.values.push_back(f.word());
-        vectors.push_back(std::move(nv.vector));
+        check(count <= (UINT64_MAX - 8) / 4 && 8 + count * 4 == nv.len,
+              "V9 norm vector length mismatch");
+        nv.legacy.position = plus(nv.pos, 8);
+        nv.legacy.count = count;
+        legacyVectors.push_back(std::move(nv.legacy));
     }
     std::vector<LegacyMatrix> matrices;
     std::set<std::pair<uint32_t, uint32_t>> keys;
@@ -414,10 +447,15 @@ void convert(const std::string &input, const std::string &output, const Options 
         for (size_t i = 1; i < list.size(); ++i)
             check(list[i].bin != list[i - 1].bin, "duplicate V9 header resolution");
     }
-    for (auto &v : vectors) {
+    for (auto &legacy : legacyVectors) {
+        auto &v = legacy.vector;
         v.ri = h.resolution(v.unit, v.ri);
-        fitVector(h, v);
+        fitVector(f, h, legacy);
     }
+    std::vector<Vector> vectors;
+    vectors.reserve(legacyVectors.size());
+    for (auto &legacy : legacyVectors)
+        vectors.push_back(std::move(legacy.vector));
     Writer writer(output, h, options);
     for (const auto &m : matrices) {
         std::fprintf(stderr, "Converting %s x %s\n", h.chromosomes[m.a].name.c_str(),

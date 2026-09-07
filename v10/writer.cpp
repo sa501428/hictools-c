@@ -512,11 +512,20 @@ void Writer::finish(const std::vector<Vector> &vectors) {
             if (kind)
                 for (uint32_t c = 0; c < header_.chromosomes.size(); ++c)
                     required = std::max(required, header_.bins(c, v.unit, v.ri));
-            check(v.values.size() == required, "vector length does not match V10 bin count");
+            const uint64_t valueCount = v.value_count();
+            check(valueCount == required, "vector length does not match V10 bin count");
             Bytes chunks;
             constexpr uint32_t nominal = 65536;
-            for (uint64_t begin = 0; begin < v.values.size(); begin += nominal) {
-                uint32_t n = narrow(std::min<uint64_t>(nominal, v.values.size() - begin));
+            check(ceil_div(valueCount, nominal) <= UINT32_MAX,
+                  "vector needs too many V10 chunks");
+            for (uint64_t begin = 0; begin < valueCount; begin += nominal) {
+                uint32_t n = narrow(std::min<uint64_t>(nominal, valueCount - begin));
+                std::vector<uint32_t> words;
+                if (v.loader)
+                    words = v.loader(begin, n);
+                else
+                    words.assign(v.values.begin() + begin, v.values.begin() + begin + n);
+                check(words.size() == n, "vector loader returned the wrong length");
                 Bytes best;
                 uint8_t transform = 0;
                 for (uint8_t t = 0; t < 3; ++t) {
@@ -525,12 +534,10 @@ void Writer::finish(const std::vector<Vector> &vectors) {
                     if (t == 1)
                         for (unsigned lane = 0; lane < 4; ++lane)
                             for (uint32_t j = 0; j < n; ++j)
-                                put(raw, v.values[begin + j] >> (8 * lane), 1);
+                                put(raw, words[j] >> (8 * lane), 1);
                     else
                         for (uint32_t j = 0; j < n; ++j)
-                            put(raw,
-                                v.values[begin + j] ^ (t == 2 && j ? v.values[begin + j - 1] : 0),
-                                4);
+                            put(raw, words[j] ^ (t == 2 && j ? words[j - 1] : 0), 4);
                     auto frame = compressed(raw, options_.level);
                     if (best.empty() || frame.size() < best.size()) {
                         best = std::move(frame);
@@ -565,7 +572,7 @@ void Writer::finish(const std::vector<Vector> &vectors) {
             put(entry, 0, 3);
             put(entry, v.ri, 4);
             put(entry, header_.resolutions[v.unit][v.ri].bin, 4);
-            put(entry, v.values.size(), 8);
+            put(entry, valueCount, 8);
             put(entry, nominal, 4);
             put(entry, chunks.size() / 32, 4);
             if (kind) {
