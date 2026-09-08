@@ -2,13 +2,12 @@
 // Direct port of SCALE-normalize-main/FINITO/finito.c, d_thMul.c, d_ppNormVector.c.
 
 #include "scale_norm.h"
-#include <cstdlib>
-#include <cstring>
+#include "../common/thread_pool.h"
 #include <algorithm>
 #include <cmath>
 #include <vector>
-#include <thread>
-#include <stdexcept>
+#include <future>
+#include <memory>
 
 // --------------------------------------------------------------------------
 // Threaded symmetric upper-triangle matrix × vector multiply
@@ -27,64 +26,76 @@ static void utmv_mul_chunk(
     }
 }
 
-static void utmv_mul(
-    const std::vector<uint32_t>& row,
-    const std::vector<uint32_t>& col,
-    const std::vector<float>&    val,
-    long m, const double* v, uint32_t k,
-    double* res, int threads,
-    std::vector<std::vector<double>>& workspace)
-{
-    // Partition work among threads
-    if (threads <= 1) {
-        std::fill(res, res + k, 0.0);
-        utmv_mul_chunk(row.data(), col.data(), val.data(), m, v, res);
-        return;
-    }
-
-    // Ensure workspace has enough buffers
-    workspace.resize(threads, std::vector<double>(k, 0.0));
-    for (auto& ws : workspace) std::fill(ws.begin(), ws.end(), 0.0);
-
-    long chunk = m / threads;
-    std::vector<std::thread> ths;
-    ths.reserve(threads);
-
-    for (int t = 0; t < threads; t++) {
-        long start = t * chunk;
-        long end   = (t == threads - 1) ? m : start + chunk;
-        double* ws = workspace[t].data();
-        ths.emplace_back([&row, &col, &val, v, ws, start, end](){
-            utmv_mul_chunk(
-                row.data() + start, col.data() + start, val.data() + start,
-                end - start, v, ws);
-        });
-    }
-    for (auto& th : ths) th.join();
-
-    // Reduce
-    std::fill(res, res + k, 0.0);
-    for (int t = 0; t < threads; t++) {
-        for (uint32_t p = 0; p < k; p++) res[p] += workspace[t][p];
-    }
+static int effective_thread_count(long entries, int requested) {
+    int result = std::max(1, requested);
+    if (entries <= 1) return 1;
+    if (entries < result) result = static_cast<int>(entries);
+    return result;
 }
+
+class UtmvMultiplier {
+public:
+    UtmvMultiplier(const std::vector<uint32_t>& row,
+                   const std::vector<uint32_t>& col,
+                   const std::vector<float>& val, long m, uint32_t k, int threads)
+        : row_(row), col_(col), val_(val), m_(m), k_(k),
+          threads_(effective_thread_count(m, threads)) {
+        if (threads_ > 1) {
+            workspace_.assign(threads_, std::vector<double>(k_, 0.0));
+            pool_ = std::make_unique<ThreadPool>(threads_);
+        }
+    }
+
+    void multiply(const double* v, double* result) {
+        if (threads_ == 1) {
+            std::fill(result, result + k_, 0.0);
+            utmv_mul_chunk(row_.data(), col_.data(), val_.data(), m_, v, result);
+            return;
+        }
+
+        std::vector<std::future<void>> futures;
+        futures.reserve(threads_);
+        for (int t = 0; t < threads_; ++t) {
+            auto& buffer = workspace_[t];
+            std::fill(buffer.begin(), buffer.end(), 0.0);
+            const long chunk = m_ / threads_;
+            const long start = t * chunk;
+            const long end = (t == threads_ - 1) ? m_ : start + chunk;
+            futures.push_back(pool_->submit([this, v, t, start, end] {
+                utmv_mul_chunk(row_.data() + start, col_.data() + start,
+                               val_.data() + start, end - start, v,
+                               workspace_[t].data());
+            }));
+        }
+        for (auto& future : futures) future.get();
+
+        std::fill(result, result + k_, 0.0);
+        for (const auto& buffer : workspace_)
+            for (uint32_t p = 0; p < k_; ++p) result[p] += buffer[p];
+    }
+
+private:
+    const std::vector<uint32_t>& row_;
+    const std::vector<uint32_t>& col_;
+    const std::vector<float>& val_;
+    long m_;
+    uint32_t k_;
+    int threads_;
+    std::vector<std::vector<double>> workspace_;
+    std::unique_ptr<ThreadPool> pool_;
+};
 
 // Maximum deviation from unit row sums in D*A*D for retained rows.
 static double balanced_row_sum_error(
-    const std::vector<uint32_t>& row,
-    const std::vector<uint32_t>& col,
-    const std::vector<float>& val,
-    long m,
     const double* b,
     const std::vector<int>& bad,
     uint32_t k,
-    int threads,
-    std::vector<std::vector<double>>& workspace,
+    UtmvMultiplier& multiplier,
     std::vector<int>* offending_rows = nullptr,
     double tolerance = 0.0)
 {
     std::vector<double> ab(k, 0.0);
-    utmv_mul(row, col, val, m, b, k, ab.data(), threads, workspace);
+    multiplier.multiply(b, ab.data());
 
     if (offending_rows) offending_rows->clear();
     double error = 0.0;
@@ -113,21 +124,21 @@ void pp_norm_vector(
     std::vector<double>& b,
     int num_threads)
 {
-    std::vector<std::vector<double>> ws;
     std::vector<double> one(k), u(k, 0.0), v_vec(k, 0.0);
+    UtmvMultiplier multiplier(row, col, val, m, k, num_threads);
 
     // Replace zero b[p] with NaN
     for (uint32_t p = 0; p < k; p++) if (b[p] == 0.0) b[p] = std::numeric_limits<double>::quiet_NaN();
     for (uint32_t p = 0; p < k; p++) one[p] = std::isnan(b[p]) ? 0.0 : 1.0;
 
     // u = A * one
-    utmv_mul(row, col, val, m, one.data(), k, u.data(), num_threads, ws);
+    multiplier.multiply(one.data(), u.data());
     double s1 = 0.0;
     for (uint32_t p = 0; p < k; p++) s1 += u[p] * one[p];
 
     // v = A * b (treating NaN as 0)
     for (uint32_t p = 0; p < k; p++) v_vec[p] = std::isnan(b[p]) ? 0.0 : b[p];
-    utmv_mul(row, col, val, m, v_vec.data(), k, u.data(), num_threads, ws);
+    multiplier.multiply(v_vec.data(), u.data());
     double s2 = 0.0;
     for (uint32_t p = 0; p < k; p++) s2 += u[p] * v_vec[p];
 
@@ -142,12 +153,6 @@ void pp_norm_vector(
 // Main SCALE balance algorithm — direct port of finito.c
 // --------------------------------------------------------------------------
 
-static int cmpint(const void* a, const void* b) {
-    if (*(int*)a < *(int*)b) return -1;
-    if (*(int*)a > *(int*)b) return 1;
-    return 0;
-}
-
 int scale_balance(
     long m,
     const std::vector<uint32_t>& ii_vec,
@@ -155,7 +160,8 @@ int scale_balance(
     const std::vector<float>&    xx_vec,
     uint32_t k,
     std::vector<double>& norm_vec,
-    const ScaleParams& params)
+    const ScaleParams& params,
+    const std::vector<double>* supplied_raw_vc)
 {
     const double tol      = params.tolerance;
     const double rs_tol   = params.row_sum_tolerance;
@@ -177,7 +183,7 @@ int scale_balance(
     std::vector<int>    bad(k, 0), bad0(k, 0);
     std::vector<double> b_conv(k), b0(k);
     std::vector<int>    bad_conv(k, 0);
-    std::vector<std::vector<double>> ws; // for threaded mul
+    UtmvMultiplier multiplier(ii_vec, jj_vec, xx_vec, m, k, threads);
 
     // Count non-zeros per row
     std::vector<int> nz(k, 0);
@@ -245,8 +251,11 @@ int scale_balance(
     // dr=dc=sqrt(VC), and initializes row=(A*one)*dr. Cutoff retries below
     // intentionally reset dr/dc to 1 for retained rows, also matching Java.
     std::vector<double> raw_vc(k, 0.0);
-    utmv_mul(ii_vec, jj_vec, xx_vec, m, one_v.data(), k,
-             raw_vc.data(), threads, ws);
+    if (supplied_raw_vc && supplied_raw_vc->size() == k && width <= 0) {
+        std::copy(supplied_raw_vc->begin(), supplied_raw_vc->end(), raw_vc.begin());
+    } else {
+        multiplier.multiply(one_v.data(), raw_vc.data());
+    }
     for (uint32_t p = 0; p < k; p++) {
         dr[p] = bad[p] ? 0.0 : std::sqrt(raw_vc[p]);
         dc[p] = dr[p];
@@ -276,12 +285,12 @@ int scale_balance(
         for (uint32_t p = 0; p < k; p++) dr[p] = (bad[p] == 0 && row_s[p] != 0) ? dr[p] / row_s[p] : 0.0;
 
         // col = A * dr
-        utmv_mul(ii_vec, jj_vec, xx_vec, m, dr.data(), k, col_s.data(), threads, ws);
+        multiplier.multiply(dr.data(), col_s.data());
         for (uint32_t p = 0; p < k; p++) col_s[p] *= dc[p];
         for (uint32_t p = 0; p < k; p++) dc[p] = (bad[p] == 0 && col_s[p] != 0) ? dc[p] / col_s[p] : 0.0;
 
         // row = A * dc
-        utmv_mul(ii_vec, jj_vec, xx_vec, m, dc.data(), k, row_s.data(), threads, ws);
+        multiplier.multiply(dc.data(), row_s.data());
         for (uint32_t p = 0; p < k; p++) row_s[p] *= dr[p];
 
         // b = sqrt(dr * dc)
@@ -305,8 +314,7 @@ int scale_balance(
         std::vector<int> row_sum_offenders;
         if (ber < tol) {
             row_sum_error = balanced_row_sum_error(
-                ii_vec, jj_vec, xx_vec, m, b, bad, k, threads, ws,
-                &row_sum_offenders, rs_tol);
+                b, bad, k, multiplier, &row_sum_offenders, rs_tol);
             row_sum_failed = !(row_sum_error <= rs_tol);
         }
 
@@ -340,7 +348,7 @@ int scale_balance(
             row_rescue_available = true;
             iter = 0; ber = 10.0;
             for (uint32_t p = 0; p < k; p++) dr[p] = dc[p] = 1.0 - bad[p];
-            utmv_mul(ii_vec, jj_vec, xx_vec, m, dc.data(), k, row_s.data(), threads, ws);
+            multiplier.multiply(dc.data(), row_s.data());
             for (uint32_t p = 0; p < k; p++) row_s[p] *= dr[p];
             continue;
         }
@@ -359,7 +367,7 @@ int scale_balance(
             ber = 10.0;
             iter = 0;
             for (uint32_t p = 0; p < k; p++) dr[p] = dc[p] = 1.0 - bad[p];
-            utmv_mul(ii_vec, jj_vec, xx_vec, m, dc.data(), k, row_s.data(), threads, ws);
+            multiplier.multiply(dc.data(), row_s.data());
             for (uint32_t p = 0; p < k; p++) row_s[p] *= dr[p];
             continue;
         }
@@ -422,7 +430,7 @@ int scale_balance(
     next_iter:
         ber = 10.0; iter = 0;
         for (uint32_t p = 0; p < k; p++) dr[p] = dc[p] = 1.0 - bad[p];
-        utmv_mul(ii_vec, jj_vec, xx_vec, m, dc.data(), k, row_s.data(), threads, ws);
+        multiplier.multiply(dc.data(), row_s.data());
         for (uint32_t p = 0; p < k; p++) row_s[p] *= dr[p];
 
         if (low > bound) break;

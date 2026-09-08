@@ -37,6 +37,8 @@ struct ScaleParams {
 //   k: number of bins (size of normalization vector)
 // Output:
 //   norm_vec[k]: normalization vector (NaN for unmappable bins)
+// raw_vc may supply the already-computed, unscaled A*1 vector. It is used only
+// for the default full-matrix first attempt; masked diagonal modes recompute it.
 // Returns final iteration count.
 int scale_balance(
     long m,
@@ -45,7 +47,8 @@ int scale_balance(
     const std::vector<float>&    val,
     uint32_t k,
     std::vector<double>& norm_vec,
-    const ScaleParams& params = ScaleParams{}
+    const ScaleParams& params = ScaleParams{},
+    const std::vector<double>* raw_vc = nullptr
 );
 
 // Post-process: normalize b[] so that sqrt(b^T A b / 1^T A 1) = 1.

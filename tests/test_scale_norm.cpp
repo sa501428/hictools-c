@@ -34,6 +34,25 @@ int main() {
     std::vector<double> b;
     scale_balance((long)row.size(), row, col, val, k, b, params);
 
+    std::vector<double> vc(k, 0.0);
+    for (size_t p = 0; p < row.size(); ++p) {
+        vc[row[p]] += val[p];
+        if (row[p] != col[p]) vc[col[p]] += val[p];
+    }
+    std::vector<double> reused;
+    scale_balance((long)row.size(), row, col, val, k, reused, params, &vc);
+    if (reused.size() != b.size()) {
+        std::cerr << "Reused VC produced the wrong SCALE vector size\n";
+        return 1;
+    }
+    for (size_t i = 0; i < b.size(); ++i) {
+        if (std::isfinite(b[i]) != std::isfinite(reused[i]) ||
+            (std::isfinite(b[i]) && std::fabs(b[i] - reused[i]) > 1e-12)) {
+            std::cerr << "Reused VC changed SCALE at row " << i << '\n';
+            return 1;
+        }
+    }
+
     if (b.size() != k || !std::isfinite(b[0]) || b[0] <= 0.0) {
         std::cerr << "The nonempty sparse row was incorrectly excluded\n";
         return 1;

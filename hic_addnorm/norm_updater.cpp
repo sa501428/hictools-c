@@ -255,13 +255,20 @@ SparseMatrix read_intra_contacts(
 //  VC and VC_SQRT computation
 // ============================================================
 
-static std::vector<float> compute_vc(const SparseMatrix& sm) {
+static std::vector<float> compute_vc(
+    const SparseMatrix& sm, std::vector<double>* precise_sums = nullptr,
+    bool make_float_sums = true) {
     if (sm.n_bins == 0) return {};
-    std::vector<float> row_sums(sm.n_bins, 0.0f);
+    std::vector<float> row_sums;
+    if (make_float_sums) row_sums.assign(sm.n_bins, 0.0f);
+    if (precise_sums) precise_sums->assign(sm.n_bins, 0.0);
     for (size_t i = 0; i < sm.row.size(); i++) {
-        row_sums[sm.row[i]] += sm.val[i];
-        if (sm.row[i] != sm.col[i])
-            row_sums[sm.col[i]] += sm.val[i];
+        if (make_float_sums) row_sums[sm.row[i]] += sm.val[i];
+        if (precise_sums) (*precise_sums)[sm.row[i]] += sm.val[i];
+        if (sm.row[i] != sm.col[i]) {
+            if (make_float_sums) row_sums[sm.col[i]] += sm.val[i];
+            if (precise_sums) (*precise_sums)[sm.col[i]] += sm.val[i];
+        }
     }
     return row_sums;
 }
@@ -276,23 +283,29 @@ static std::vector<float> compute_vc_sqrt(const std::vector<float>& vc) {
 
 // Juicer rescales every saved normalization vector so the sum of the
 // normalized matrix equals the sum of the raw matrix.
-static void fix_by_sum_factor(const SparseMatrix& sm, std::vector<float>& norm) {
-    double raw_sum = 0.0;
-    double normalized_sum = 0.0;
+static void fix_by_sum_factor(
+    const SparseMatrix& sm, const std::vector<std::vector<float>*>& norms) {
+    std::vector<double> raw_sums(norms.size(), 0.0);
+    std::vector<double> normalized_sums(norms.size(), 0.0);
     for (size_t p = 0; p < sm.row.size(); ++p) {
         const uint32_t x = sm.row[p], y = sm.col[p];
-        const float nx = norm[x], ny = norm[y];
-        if (!(nx > 0.0f) || !(ny > 0.0f) ||
-            !std::isfinite(nx) || !std::isfinite(ny)) {
-            continue;
-        }
         const double multiplier = (x == y) ? 1.0 : 2.0;
-        raw_sum += multiplier * sm.val[p];
-        normalized_sum += multiplier * sm.val[p] / ((double)nx * ny);
+        for (size_t i = 0; i < norms.size(); ++i) {
+            const float nx = (*norms[i])[x], ny = (*norms[i])[y];
+            if (!(nx > 0.0f) || !(ny > 0.0f) ||
+                !std::isfinite(nx) || !std::isfinite(ny)) {
+                continue;
+            }
+            raw_sums[i] += multiplier * sm.val[p];
+            normalized_sums[i] += multiplier * sm.val[p] / ((double)nx * ny);
+        }
     }
-    if (raw_sum <= 0.0 || normalized_sum <= 0.0) return;
-    const float factor = (float)std::sqrt(normalized_sum / raw_sum);
-    for (float& v : norm) if (std::isfinite(v) && v > 0.0f) v *= factor;
+    for (size_t i = 0; i < norms.size(); ++i) {
+        if (raw_sums[i] <= 0.0 || normalized_sums[i] <= 0.0) continue;
+        const float factor = (float)std::sqrt(normalized_sums[i] / raw_sums[i]);
+        for (float& v : *norms[i])
+            if (std::isfinite(v) && v > 0.0f) v *= factor;
+    }
 }
 
 // ============================================================
@@ -417,46 +430,28 @@ void add_norm(const std::string& hic_path, const AddNormOptions& opts) {
             if (sm.row.empty()) { fprintf(stderr, " (empty)\n"); continue; }
 
             int n_bins = (int)sm.n_bins;
+            const bool do_scale = opts.build_scale &&
+                (opts.min_scale_res == 0 || res >= opts.min_scale_res);
 
             // ---- VC ----
+            std::vector<float> raw_vc;
+            std::vector<double> scale_vc;
+            if (opts.build_vc || opts.build_vc_sqrt || do_scale) {
+                raw_vc = compute_vc(sm, do_scale ? &scale_vc : nullptr,
+                                    opts.build_vc || opts.build_vc_sqrt);
+            }
             std::vector<float> vc_vec;
-            if (opts.build_vc || opts.build_vc_sqrt || opts.build_scale) {
-                vc_vec = compute_vc(sm);
-            }
-            if (opts.build_vc) {
-                fix_by_sum_factor(sm, vc_vec);
-                // Accumulate expected
-                for (long p = 0; p < (long)sm.row.size(); p++) {
-                    int32_t b1 = sm.row[p], b2 = sm.col[p];
-                    float n1 = vc_vec[b1], n2 = vc_vec[b2];
-                    if (std::isnan(n1) || std::isnan(n2) || n1 == 0 || n2 == 0) continue;
-                    float norm_v = sm.val[p] / (n1 * n2);
-                    ev_vc.add_distance(ci, b1, b2, norm_v);
-                }
-                all_norm_vecs.push_back({NORM_VC, ci, res, vc_vec});
-                fprintf(stderr, " VC");
-            }
+            if (opts.build_vc) vc_vec = raw_vc;
 
             // ---- VC_SQRT ----
-            if (opts.build_vc_sqrt && !vc_vec.empty()) {
-                // VC_SQRT starts from unscaled row sums, not the saved/scaled VC.
-                auto raw_vc = compute_vc(sm);
-                auto vcs_vec = compute_vc_sqrt(raw_vc);
-                fix_by_sum_factor(sm, vcs_vec);
-                // Accumulate expected
-                for (long p = 0; p < (long)sm.row.size(); p++) {
-                    int32_t b1 = sm.row[p], b2 = sm.col[p];
-                    float n1 = vcs_vec[b1], n2 = vcs_vec[b2];
-                    if (std::isnan(n1) || std::isnan(n2) || n1 == 0 || n2 == 0) continue;
-                    float norm_v = sm.val[p] / (n1 * n2);
-                    ev_vc_sqrt.add_distance(ci, b1, b2, norm_v);
-                }
-                all_norm_vecs.push_back({NORM_VC_SQRT, ci, res, vcs_vec});
-                fprintf(stderr, " VC_SQRT");
+            std::vector<float> vcs_vec;
+            if (opts.build_vc_sqrt && !raw_vc.empty()) {
+                vcs_vec = compute_vc_sqrt(raw_vc);
             }
 
             // ---- SCALE ----
-            if (opts.build_scale && (opts.min_scale_res == 0 || res >= opts.min_scale_res)) {
+            std::vector<float> scale_f;
+            if (do_scale) {
                 ScaleParams sp;
                 sp.tolerance       = opts.scale_tolerance;
                 sp.total_max_iter  = opts.scale_max_iter;
@@ -464,18 +459,17 @@ void add_norm(const std::string& hic_path, const AddNormOptions& opts) {
 
                 std::vector<double> scale_b(n_bins, std::numeric_limits<double>::quiet_NaN());
                 scale_balance((long)sm.row.size(), sm.row, sm.col, sm.val,
-                              (uint32_t)n_bins, scale_b, sp);
+                              (uint32_t)n_bins, scale_b, sp, &scale_vc);
                 pp_norm_vector((long)sm.row.size(), sm.row, sm.col, sm.val,
                                (uint32_t)n_bins, scale_b, opts.num_threads);
 
                 // Convert to float
-                std::vector<float> scale_f(n_bins);
+                scale_f.resize(n_bins);
                 for (int i = 0; i < n_bins; i++) {
                     scale_f[i] = std::isnan(scale_b[i])
                                  ? std::numeric_limits<float>::quiet_NaN()
                                  : (float)scale_b[i];
                 }
-                fix_by_sum_factor(sm, scale_f);
                 bool has_finite_scale = false;
                 for (float v : scale_f) {
                     if (std::isfinite(v) && v > 0.0f) {
@@ -485,19 +479,43 @@ void add_norm(const std::string& hic_path, const AddNormOptions& opts) {
                 }
                 if (!has_finite_scale) {
                     fprintf(stderr, " SCALE_FAILED");
-                    fprintf(stderr, "\n");
-                    continue;
+                    scale_f.clear();
                 }
-                // Accumulate expected
-                for (long p = 0; p < (long)sm.row.size(); p++) {
-                    int32_t b1 = sm.row[p], b2 = sm.col[p];
-                    float n1 = (b1 < n_bins) ? scale_f[b1] : std::numeric_limits<float>::quiet_NaN();
-                    float n2 = (b2 < n_bins) ? scale_f[b2] : std::numeric_limits<float>::quiet_NaN();
-                    if (std::isnan(n1) || std::isnan(n2) || n1 == 0 || n2 == 0) continue;
-                    float norm_v = sm.val[p] / (n1 * n2);
-                    ev_scale.add_distance(ci, b1, b2, norm_v);
-                }
-                all_norm_vecs.push_back({NORM_SCALE, ci, res, scale_f});
+            }
+
+            std::vector<std::vector<float>*> norms;
+            if (!vc_vec.empty()) norms.push_back(&vc_vec);
+            if (!vcs_vec.empty()) norms.push_back(&vcs_vec);
+            if (!scale_f.empty()) norms.push_back(&scale_f);
+            fix_by_sum_factor(sm, norms);
+
+            // Accumulate every enabled normalized expected vector in one
+            // traversal of the contact arrays.
+            for (size_t p = 0; p < sm.row.size(); ++p) {
+                const uint32_t b1 = sm.row[p], b2 = sm.col[p];
+                auto add = [&](const std::vector<float>& norm,
+                               ExpectedValueCalculation& expected) {
+                    if (norm.empty()) return;
+                    const float n1 = norm[b1], n2 = norm[b2];
+                    if (!(n1 > 0.0f) || !(n2 > 0.0f) ||
+                        !std::isfinite(n1) || !std::isfinite(n2)) return;
+                    expected.add_distance(ci, b1, b2, sm.val[p] / (n1 * n2));
+                };
+                add(vc_vec, ev_vc);
+                add(vcs_vec, ev_vc_sqrt);
+                add(scale_f, ev_scale);
+            }
+
+            if (!vc_vec.empty()) {
+                all_norm_vecs.push_back({NORM_VC, ci, res, std::move(vc_vec)});
+                fprintf(stderr, " VC");
+            }
+            if (!vcs_vec.empty()) {
+                all_norm_vecs.push_back({NORM_VC_SQRT, ci, res, std::move(vcs_vec)});
+                fprintf(stderr, " VC_SQRT");
+            }
+            if (!scale_f.empty()) {
+                all_norm_vecs.push_back({NORM_SCALE, ci, res, std::move(scale_f)});
                 fprintf(stderr, " SCALE");
             }
             fprintf(stderr, "\n");

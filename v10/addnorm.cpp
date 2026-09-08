@@ -51,46 +51,54 @@ std::vector<float> raw_vc(const Sparse &s) {
         result[i] = static_cast<float>(sums[i]);
     return result;
 }
-void fix_sum(const Sparse &s, std::vector<float> &norm) {
-    double raw = 0, normalized = 0;
+void fix_sum(const Sparse &s, const std::vector<std::vector<float>*> &norms) {
+    std::vector<double> raw(norms.size(), 0.0), normalized(norms.size(), 0.0);
     for (size_t i = 0; i < s.row.size(); ++i) {
         uint32_t x = s.row[i], y = s.col[i];
-        float nx = norm[x], ny = norm[y];
-        if (!(nx > 0) || !(ny > 0) || !std::isfinite(nx) || !std::isfinite(ny))
-            continue;
         double multiple = x == y ? 1 : 2;
-        raw += multiple * s.value[i];
-        normalized += multiple * s.value[i] / (double(nx) * ny);
+        for (size_t n = 0; n < norms.size(); ++n) {
+            float nx = (*norms[n])[x], ny = (*norms[n])[y];
+            if (!(nx > 0) || !(ny > 0) || !std::isfinite(nx) || !std::isfinite(ny))
+                continue;
+            raw[n] += multiple * s.value[i];
+            normalized[n] += multiple * s.value[i] / (double(nx) * ny);
+        }
     }
-    if (raw <= 0 || normalized <= 0)
-        return;
-    float factor = static_cast<float>(std::sqrt(normalized / raw));
-    for (float &v : norm)
-        if (v > 0 && std::isfinite(v))
-            v *= factor;
+    for (size_t n = 0; n < norms.size(); ++n) {
+        if (raw[n] <= 0 || normalized[n] <= 0)
+            continue;
+        float factor = static_cast<float>(std::sqrt(normalized[n] / raw[n]));
+        for (float &v : *norms[n])
+            if (v > 0 && std::isfinite(v))
+                v *= factor;
+    }
 }
 struct ExpectedAccumulator {
     std::vector<double> actual;
     std::map<uint32_t, double> observed;
     std::map<uint32_t, uint32_t> chromosome_bins;
     explicit ExpectedAccumulator(uint32_t size) : actual(size, 0) {}
-    void add(uint32_t chr, const Sparse &s, const std::vector<float> *norm = nullptr) {
-        double total = 0;
-        chromosome_bins[chr] = s.bins;
+    static void add_many(
+        uint32_t chr, const Sparse &s,
+        const std::vector<std::pair<ExpectedAccumulator*, const std::vector<float>*>>& work) {
+        std::vector<double> totals(work.size(), 0.0);
+        for (const auto& item : work) item.first->chromosome_bins[chr] = s.bins;
         for (size_t i = 0; i < s.row.size(); ++i) {
-            double value = s.value[i];
-            if (norm) {
-                float a = (*norm)[s.row[i]], b = (*norm)[s.col[i]];
-                if (!(a > 0) || !(b > 0) || !std::isfinite(a) || !std::isfinite(b))
-                    continue;
-                value /= double(a) * b;
+            for (size_t n = 0; n < work.size(); ++n) {
+                double value = s.value[i];
+                if (work[n].second) {
+                    float a = (*work[n].second)[s.row[i]];
+                    float b = (*work[n].second)[s.col[i]];
+                    if (!(a > 0) || !(b > 0) || !std::isfinite(a) || !std::isfinite(b))
+                        continue;
+                    value /= double(a) * b;
+                }
+                work[n].first->actual[s.col[i] - s.row[i]] += value;
+                totals[n] += value;
             }
-            uint32_t distance = s.col[i] - s.row[i];
-            actual[distance] += value;
-            total += value;
         }
-        if (total > 0)
-            observed[chr] += total;
+        for (size_t n = 0; n < work.size(); ++n)
+            if (totals[n] > 0) work[n].first->observed[chr] += totals[n];
     }
     Vector finish(uint8_t kind, uint32_t norm, uint8_t unit, uint32_t ri, bool smooth) {
         std::vector<uint32_t> lengths;
@@ -386,86 +394,111 @@ void add_norm_v10(const std::string &path, const AddNormOptions &options) {
                 maximum = std::max(maximum, narrow(h.bins(chr, unit, ri)));
             check(maximum != 0, "cannot create an empty expected vector");
             ExpectedAccumulator raw(maximum);
-            for (uint32_t chr = 0; chr < h.chromosomes.size(); ++chr)
-                if (real_chromosome(h.chromosomes[chr])) {
-                    auto s = sparse_matrix(reader.matrix(chr, chr, unit, ri),
-                                           narrow(h.bins(chr, unit, ri)));
-                    raw.add(chr, s);
-                }
-            output.add(raw.finish(1, 0, unit, ri, true));
-            struct Work {
-                const char *name;
-                uint32_t id;
-                bool enabled;
-            };
-            std::vector<Work> work{
-                {"VC", vc, options.vc},
-                {"VC_SQRT", vcs, options.vc_sqrt},
-                {"SCALE", scale,
-                 build_scale && (unit != 0 || options.minimum_scale_resolution == 0 ||
-                                 int(bin) >= options.minimum_scale_resolution)}};
-            for (auto item : work) {
-                if (!item.enabled)
-                    continue;
-                std::fprintf(stderr, "  %s", item.name);
-                std::fflush(stderr);
-                ExpectedAccumulator expected(maximum);
-                uint32_t written = 0;
-                for (uint32_t chr = 0; chr < h.chromosomes.size(); ++chr) {
-                    if (!real_chromosome(h.chromosomes[chr]))
-                        continue;
-                    auto s = sparse_matrix(reader.matrix(chr, chr, unit, ri),
-                                           narrow(h.bins(chr, unit, ri)));
-                    if (s.row.empty())
-                        continue;
-                    std::vector<float> norm;
-                    if (item.id == scale) {
-                        ScaleParams p;
-                        p.tolerance = options.tolerance;
-                        p.total_max_iter = options.max_iterations;
-                        p.num_threads = options.threads;
-                        std::vector<float> values;
-                        values.reserve(s.value.size());
-                        for (double value : s.value)
-                            values.push_back(static_cast<float>(value));
-                        std::vector<double> b(s.bins, std::numeric_limits<double>::quiet_NaN());
-                        scale_balance(s.row.size(), s.row, s.col, values, s.bins, b, p);
-                        pp_norm_vector(s.row.size(), s.row, s.col, values, s.bins, b,
-                                       options.threads);
-                        norm.resize(s.bins);
-                        for (size_t i = 0; i < b.size(); ++i)
-                            norm[i] = static_cast<float>(b[i]);
-                    } else {
-                        norm = raw_vc(s);
-                        if (item.id == vcs)
-                            for (float &value : norm)
-                                value = std::sqrt(value);
+            ExpectedAccumulator expected_vc(maximum), expected_vcs(maximum),
+                                expected_scale(maximum);
+            uint32_t written_vc = 0, written_vcs = 0, written_scale = 0;
+            const bool do_scale =
+                build_scale && (unit != 0 || options.minimum_scale_resolution == 0 ||
+                                int(bin) >= options.minimum_scale_resolution);
+
+            auto save_norm = [&](uint32_t chr, uint32_t id,
+                                 const std::vector<float>& norm, uint32_t& written) {
+                bool valid = false;
+                for (float value : norm)
+                    if (value > 0 && std::isfinite(value)) {
+                        valid = true;
+                        break;
                     }
-                    fix_sum(s, norm);
-                    bool valid = false;
-                    for (float value : norm)
-                        if (value > 0 && std::isfinite(value)) {
-                            valid = true;
-                            break;
-                        }
-                    if (!valid)
-                        continue;
-                    Vector v;
-                    v.kind = 0;
-                    v.norm = item.id;
-                    v.chr = chr;
-                    v.unit = unit;
-                    v.ri = ri;
-                    for (float value : norm)
-                        v.values.push_back(bits(value));
-                    output.add(v);
-                    expected.add(chr, s, &norm);
-                    ++written;
+                if (!valid)
+                    return;
+                Vector v;
+                v.kind = 0;
+                v.norm = id;
+                v.chr = chr;
+                v.unit = unit;
+                v.ri = ri;
+                v.values.reserve(norm.size());
+                for (float value : norm)
+                    v.values.push_back(bits(value));
+                output.add(v);
+                ++written;
+            };
+
+            // Materializing a derived matrix can itself be expensive. Keep the
+            // chromosome outermost so raw expected, VC, VC_SQRT, and SCALE all
+            // consume the same sparse matrix and the same raw coverage vector.
+            for (uint32_t chr = 0; chr < h.chromosomes.size(); ++chr) {
+                if (!real_chromosome(h.chromosomes[chr]))
+                    continue;
+                auto s = sparse_matrix(reader.matrix(chr, chr, unit, ri),
+                                       narrow(h.bins(chr, unit, ri)));
+                std::vector<float> coverage, vc_norm, vcs_norm, scale_norm;
+                if (!s.row.empty() && (options.vc || options.vc_sqrt))
+                    coverage = raw_vc(s);
+
+                if (options.vc) vc_norm = coverage;
+                if (options.vc_sqrt) {
+                    vcs_norm = coverage;
+                    for (float& value : vcs_norm) value = std::sqrt(value);
                 }
-                if (written)
-                    output.add(expected.finish(2, item.id, unit, ri, true));
-                std::fprintf(stderr, " (%u chromosomes)\n", written);
+                if (!s.row.empty() && do_scale) {
+                    ScaleParams p;
+                    p.tolerance = options.tolerance;
+                    p.total_max_iter = options.max_iterations;
+                    p.num_threads = options.threads;
+                    std::vector<float> values;
+                    values.reserve(s.value.size());
+                    std::vector<double> scale_vc(s.bins, 0.0);
+                    for (size_t i = 0; i < s.value.size(); ++i) {
+                        double value = s.value[i];
+                        values.push_back(static_cast<float>(value));
+                        const double stored = values.back();
+                        scale_vc[s.row[i]] += stored;
+                        if (s.row[i] != s.col[i]) scale_vc[s.col[i]] += stored;
+                    }
+                    std::vector<double> b(s.bins,
+                                          std::numeric_limits<double>::quiet_NaN());
+                    scale_balance(s.row.size(), s.row, s.col, values, s.bins, b, p,
+                                  &scale_vc);
+                    pp_norm_vector(s.row.size(), s.row, s.col, values, s.bins, b,
+                                   options.threads);
+                    scale_norm.resize(b.size());
+                    for (size_t i = 0; i < b.size(); ++i)
+                        scale_norm[i] = static_cast<float>(b[i]);
+                }
+
+                std::vector<std::vector<float>*> norms;
+                if (!vc_norm.empty()) norms.push_back(&vc_norm);
+                if (!vcs_norm.empty()) norms.push_back(&vcs_norm);
+                if (!scale_norm.empty()) norms.push_back(&scale_norm);
+                fix_sum(s, norms);
+
+                std::vector<std::pair<ExpectedAccumulator*, const std::vector<float>*>>
+                    expected_work{{&raw, nullptr}};
+                if (!vc_norm.empty()) expected_work.push_back({&expected_vc, &vc_norm});
+                if (!vcs_norm.empty()) expected_work.push_back({&expected_vcs, &vcs_norm});
+                if (!scale_norm.empty())
+                    expected_work.push_back({&expected_scale, &scale_norm});
+                ExpectedAccumulator::add_many(chr, s, expected_work);
+
+                if (!vc_norm.empty()) save_norm(chr, vc, vc_norm, written_vc);
+                if (!vcs_norm.empty()) save_norm(chr, vcs, vcs_norm, written_vcs);
+                if (!scale_norm.empty()) save_norm(chr, scale, scale_norm, written_scale);
             }
+
+            output.add(raw.finish(1, 0, unit, ri, true));
+            if (written_vc)
+                output.add(expected_vc.finish(2, vc, unit, ri, true));
+            if (written_vcs)
+                output.add(expected_vcs.finish(2, vcs, unit, ri, true));
+            if (written_scale)
+                output.add(expected_scale.finish(2, scale, unit, ri, true));
+            if (options.vc)
+                std::fprintf(stderr, "  VC (%u chromosomes)\n", written_vc);
+            if (options.vc_sqrt)
+                std::fprintf(stderr, "  VC_SQRT (%u chromosomes)\n", written_vcs);
+            if (do_scale)
+                std::fprintf(stderr, "  SCALE (%u chromosomes)\n", written_scale);
         }
     output.finish(h);
     std::fprintf(stderr, "\nV10 normalization complete: %s\n", path.c_str());
