@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <fstream>
 #include <future>
 #include <set>
+#include <sstream>
 #include <sys/stat.h>
 #include <tuple>
 #include <unistd.h>
@@ -357,34 +359,146 @@ Writer::Writer(const std::string &output, Header header, const Options &options,
         str(b, n);
     for (unsigned i = 0; i < 8; ++i)
         b[8 + i] = static_cast<uint8_t>(uint64_t(b.size()) >> (8 * i));
-    // Stage beside the destination and publish only after every backpatch and
-    // fclose succeeds. A failed conversion never clobbers an existing output.
-    temporary_ = output + ".tmp.XXXXXX";
-    std::vector<char> path(temporary_.begin(), temporary_.end());
-    path.push_back(0);
-    int fd = mkstemp(path.data());
-    check(fd >= 0, "cannot create output temporary file");
-    temporary_ = path.data();
-    file_ = fdopen(fd, "w+b");
-    if (!file_) {
-        close(fd);
-        std::remove(temporary_.c_str());
-        throw std::runtime_error("V10: fdopen failed");
+    if (options_.stagingPath.empty()) {
+        // Stage beside the destination and publish only after every backpatch and
+        // fclose succeeds. A failed conversion never clobbers an existing output.
+        temporary_ = output + ".tmp.XXXXXX";
+        std::vector<char> path(temporary_.begin(), temporary_.end());
+        path.push_back(0);
+        int fd = mkstemp(path.data());
+        check(fd >= 0, "cannot create output temporary file");
+        temporary_ = path.data();
+        file_ = fdopen(fd, "w+b");
+        if (!file_) {
+            close(fd);
+            std::remove(temporary_.c_str());
+            throw std::runtime_error("V10: fdopen failed");
+        }
+        try {
+            write(b);
+        } catch (...) {
+            std::fclose(file_);
+            file_ = nullptr;
+            std::remove(temporary_.c_str());
+            throw;
+        }
+        return;
     }
-    try {
-        write(b);
-    } catch (...) {
-        std::fclose(file_);
-        file_ = nullptr;
-        std::remove(temporary_.c_str());
-        throw;
-    }
+    // Resumable staging. The staged file sits beside the destination so that
+    // publishing stays a rename, and it survives a failed run so the next one
+    // can pick up where the journal says the output was last durable.
+    temporary_ = options_.stagingPath;
+    journal_ = temporary_ + ".journal";
+    keepTemporary_ = true;
+    if (options_.resume && restore(b))
+        return;
+    file_ = std::fopen(temporary_.c_str(), "w+b");
+    check(file_ != nullptr, "cannot create output staging file " + temporary_);
+    write(b);
+    startJournal(b);
 }
 Writer::~Writer() {
     if (file_)
         std::fclose(file_);
-    if (!temporary_.empty())
+    if (!temporary_.empty() && !keepTemporary_)
         std::remove(temporary_.c_str());
+}
+bool Writer::completed(uint32_t a, uint32_t b) const {
+    for (const auto &e : entries_)
+        if (e.a == a && e.b == b)
+            return true;
+    return false;
+}
+void Writer::startJournal(const Bytes &header) {
+    std::string text = "hictools-v10-journal 1\nfingerprint " +
+                       (options_.resumeKey.empty() ? std::string("-") : options_.resumeKey) +
+                       "\nheader " + std::to_string(header.size()) + " " +
+                       hex64(fnv1a(header.data(), header.size())) + "\n";
+    std::unique_ptr<FILE, int (*)(FILE *)> journal(std::fopen(journal_.c_str(), "wb"),
+                                                   &std::fclose);
+    check(bool(journal), "cannot create resume journal " + journal_);
+    check(std::fwrite(text.data(), 1, text.size(), journal.get()) == text.size() &&
+              std::fflush(journal.get()) == 0 && fsync(fileno(journal.get())) == 0,
+          "cannot write resume journal");
+}
+void Writer::record(uint32_t a, uint32_t b, uint64_t pos, uint64_t len) {
+    // The journal may only ever claim bytes that already survived a crash, so
+    // the staged output is synced before its end offset is recorded.
+    check(std::fflush(file_) == 0, "cannot flush staged output");
+    check(fsync(fileno(file_)) == 0, "cannot sync staged output");
+    std::string line = "pair " + std::to_string(a) + " " + std::to_string(b) + " " +
+                       std::to_string(pos) + " " + std::to_string(len) + " " +
+                       std::to_string(position()) + "\n";
+    std::unique_ptr<FILE, int (*)(FILE *)> journal(std::fopen(journal_.c_str(), "ab"),
+                                                   &std::fclose);
+    check(bool(journal), "cannot open resume journal " + journal_);
+    check(std::fwrite(line.data(), 1, line.size(), journal.get()) == line.size() &&
+              std::fflush(journal.get()) == 0 && fsync(fileno(journal.get())) == 0,
+          "cannot append to resume journal");
+}
+bool Writer::restore(const Bytes &header) {
+    std::ifstream in(journal_, std::ios::binary);
+    std::string line;
+    if (!in || !std::getline(in, line) || line != "hictools-v10-journal 1")
+        return false;
+    std::string fingerprint, headerHash;
+    uint64_t headerLength = 0, end = 0;
+    bool haveFingerprint = false, haveHeader = false;
+    std::vector<Entry> restored;
+    std::set<std::pair<uint32_t, uint32_t>> seen;
+    while (std::getline(in, line)) {
+        if (line.empty())
+            continue;
+        std::istringstream fields(line);
+        std::string tag;
+        fields >> tag;
+        if (tag == "fingerprint") {
+            fields >> fingerprint;
+            haveFingerprint = true;
+        } else if (tag == "header") {
+            fields >> headerLength >> headerHash;
+            haveHeader = true;
+        } else if (tag == "pair") {
+            uint64_t a = 0, b = 0, pos = 0, len = 0, at = 0;
+            fields >> a >> b >> pos >> len >> at;
+            if (fields.fail() || b >= header_.chromosomes.size() || a > b || len == 0 ||
+                pos < header.size() || at < pos + len || at < end ||
+                !seen.insert({static_cast<uint32_t>(a), static_cast<uint32_t>(b)}).second)
+                return false;
+            restored.push_back({static_cast<uint32_t>(a), static_cast<uint32_t>(b), pos, len});
+            end = at;
+        } else
+            return false;
+        if (fields.fail())
+            return false;
+    }
+    // A truncated final line means the process died mid-append; everything up to
+    // it is still usable, but an unparsable one is not, so the loop above bails.
+    if (!haveFingerprint || !haveHeader || restored.empty() ||
+        fingerprint != (options_.resumeKey.empty() ? std::string("-") : options_.resumeKey) ||
+        headerLength != header.size() ||
+        headerHash != hex64(fnv1a(header.data(), header.size())))
+        return false;
+    std::unique_ptr<FILE, int (*)(FILE *)> staged(std::fopen(temporary_.c_str(), "r+b"),
+                                                  &std::fclose);
+    if (!staged || fseeko(staged.get(), 0, SEEK_END) != 0)
+        return false;
+    auto size = ftello(staged.get());
+    if (size < 0 || uint64_t(size) < end)
+        return false;
+    Bytes head(header.size());
+    if (fseeko(staged.get(), 0, SEEK_SET) != 0 ||
+        std::fread(head.data(), 1, head.size(), staged.get()) != head.size() || head != header)
+        return false;
+    if (ftruncate(fileno(staged.get()), static_cast<off_t>(end)) != 0 ||
+        fseeko(staged.get(), static_cast<off_t>(end), SEEK_SET) != 0)
+        return false;
+    file_ = staged.release();
+    entries_ = std::move(restored);
+    std::fprintf(stderr, "Resuming %s: %zu chromosome pair%s already written (%llu bytes)\n",
+                 temporary_.c_str(), entries_.size(), entries_.size() == 1 ? "" : "s",
+                 static_cast<unsigned long long>(end));
+    return true;
 }
 void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, uint32_t)> &load) {
     check(a <= b && b < header_.chromosomes.size(), "invalid matrix pair");
@@ -526,6 +640,8 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
             put(desc, 0, 4);
             patch(metaPos + 24 + uint64_t(ordinal) * 76, desc);
         }
+    if (!journal_.empty())
+        record(a, b, metaPos, meta.size());
 }
 void Writer::finish(const std::vector<Vector> &vectors) {
     std::array<std::vector<const Vector *>, 3> groups;
@@ -654,5 +770,9 @@ void Writer::finish(const std::vector<Vector> &vectors) {
     check(std::fclose(f) == 0, "cannot close output");
     check(std::rename(temporary_.c_str(), output_.c_str()) == 0, "cannot publish output");
     temporary_.clear();
+    if (!journal_.empty()) {
+        std::remove(journal_.c_str());
+        journal_.clear();
+    }
 }
 } // namespace hic10

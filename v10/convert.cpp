@@ -1,6 +1,7 @@
 #include "format.h"
 #include "common/thread_pool.h"
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <deque>
 #include <dirent.h>
@@ -16,22 +17,23 @@
 namespace hic10 {
 namespace {
 constexpr uint64_t limit = 512ULL * 1024 * 1024;
-struct TempWorkspace {
+// The workspace name is derived from the run identity so an interrupted
+// conversion reuses the same directory instead of leaking a fresh mkdtemp one.
+// Spools inside it are per-pair scratch and are always discarded; the resumable
+// state is the staged output and its journal, which live beside the output.
+struct Workspace {
     std::string path;
 
-    explicit TempWorkspace(const std::string &directory) {
-        std::string pattern = directory + "/hic-v10-convert-XXXXXX";
-        std::vector<char> name(pattern.begin(), pattern.end());
-        name.push_back(0);
-        check(mkdtemp(name.data()) != nullptr,
-              "cannot create V10 conversion workspace in " + directory);
-        path = name.data();
+    Workspace(const std::string &directory, const std::string &key) {
+        path = directory + "/hic-v10-convert-" + key;
+        check(mkdir(path.c_str(), 0700) == 0 || errno == EEXIST,
+              "cannot create V10 conversion workspace " + path);
+        // A previous run may have died holding partially written spools.
+        sweep();
     }
-    TempWorkspace(const TempWorkspace &) = delete;
-    TempWorkspace &operator=(const TempWorkspace &) = delete;
-    ~TempWorkspace() {
-        if (path.empty())
-            return;
+    Workspace(const Workspace &) = delete;
+    Workspace &operator=(const Workspace &) = delete;
+    void sweep() const {
         if (DIR *directory = opendir(path.c_str())) {
             while (dirent *entry = readdir(directory)) {
                 std::string name = entry->d_name;
@@ -40,25 +42,19 @@ struct TempWorkspace {
             }
             closedir(directory);
         }
+    }
+    ~Workspace() {
+        sweep();
         rmdir(path.c_str());
     }
 };
 struct Spool {
     FILE *file = nullptr;
     std::string path;
-    explicit Spool(const std::string &directory) {
-        std::string pattern = directory + "/hic-v10-matrix-XXXXXX";
-        std::vector<char> name(pattern.begin(), pattern.end());
-        name.push_back(0);
-        int fd = mkstemp(name.data());
-        check(fd >= 0, "cannot create conversion matrix spool");
-        path = name.data();
-        file = fdopen(fd, "w+b");
-        if (!file) {
-            ::close(fd);
-            std::remove(path.c_str());
-            throw std::runtime_error("V10: cannot open conversion matrix spool");
-        }
+    Spool(const std::string &directory, const std::string &name) {
+        path = directory + "/" + name;
+        file = std::fopen(path.c_str(), "w+b");
+        check(file != nullptr, "cannot create conversion matrix spool " + path);
     }
     ~Spool() {
         if (file)
@@ -330,7 +326,8 @@ PreparedMatrix prepareMatrix(const std::string &input, LegacyMatrix matrix, cons
     PreparedMatrix prepared;
     prepared.a = matrix.a;
     prepared.b = matrix.b;
-    prepared.spool = std::make_shared<Spool>(directory);
+    prepared.spool = std::make_shared<Spool>(
+        directory, "spool-" + std::to_string(matrix.a) + "-" + std::to_string(matrix.b));
     for (uint8_t unit = 0; unit < 2; ++unit) {
         prepared.ranges[unit].resize(header.resolutions[unit].size());
         for (uint32_t ri = 0; ri < header.resolutions[unit].size(); ++ri) {
@@ -655,11 +652,41 @@ void convert(const std::string &input, const std::string &output, const Options 
         for (size_t i = 1; i < list.size(); ++i)
             check(list[i].bin != list[i - 1].bin, "duplicate V9 header resolution");
     }
-    for (auto &legacy : legacyVectors) {
-        auto &v = legacy.vector;
-        v.ri = h.resolution(v.unit, v.ri);
-        fitVector(f, h, legacy);
+    for (auto &legacy : legacyVectors)
+        legacy.vector.ri = h.resolution(legacy.vector.unit, legacy.vector.ri);
+    // Juicer's addNorm appends to the normalization index without pruning the
+    // vectors it supersedes, so a V9 file can list the same key more than once
+    // (ENCODE HCT116 lists every VC and VC_SQRT vector twice). V9 readers build
+    // a map and keep the last entry for a key; do the same instead of handing
+    // the writer a colliding vector set.
+    {
+        using Key = std::tuple<uint8_t, uint32_t, uint32_t, uint8_t, uint32_t>;
+        auto keyOf = [](const Vector &v) {
+            return Key{v.kind, v.kind == 1 ? 0 : v.norm, v.kind == 0 ? v.chr : 0, v.unit, v.ri};
+        };
+        std::map<Key, size_t> latest;
+        for (size_t i = 0; i < legacyVectors.size(); ++i)
+            latest[keyOf(legacyVectors[i].vector)] = i;
+        if (latest.size() != legacyVectors.size()) {
+            std::vector<size_t> keep;
+            keep.reserve(latest.size());
+            for (const auto &entry : latest)
+                keep.push_back(entry.second);
+            std::sort(keep.begin(), keep.end());
+            std::vector<LegacyVector> unique;
+            unique.reserve(keep.size());
+            for (auto i : keep)
+                unique.push_back(std::move(legacyVectors[i]));
+            std::fprintf(stderr,
+                         "Dropped %zu superseded V9 vector%s with duplicate keys"
+                         " (kept the last of each)\n",
+                         legacyVectors.size() - unique.size(),
+                         legacyVectors.size() - unique.size() == 1 ? "" : "s");
+            legacyVectors = std::move(unique);
+        }
     }
+    for (auto &legacy : legacyVectors)
+        fitVector(f, h, legacy);
     std::vector<Vector> vectors;
     vectors.reserve(legacyVectors.size());
     for (auto &legacy : legacyVectors)
@@ -668,10 +695,28 @@ void convert(const std::string &input, const std::string &output, const Options 
     const size_t readAhead = options.readAhead ? options.readAhead : options.threads;
     check(readAhead > 0 && readAhead <= 256,
           "invalid chromosome-pair read-ahead count");
+    // Identify the run by everything that changes the bytes written: the source
+    // file, the destination, and every option the writer encodes with. A resumed
+    // journal or workspace that does not match this key is not reused.
+    std::string identity = "hictools-v10-convert\x1f" + input + "\x1f" + output + "\x1f" +
+                           std::to_string(uint64_t(in.st_dev)) + "\x1f" +
+                           std::to_string(uint64_t(in.st_ino)) + "\x1f" +
+                           std::to_string(uint64_t(in.st_size)) + "\x1f" +
+                           std::to_string(int64_t(in.st_mtime)) + "\x1f" +
+                           std::to_string(options.level) + "\x1f" +
+                           std::to_string(options.blockBins) + "\x1f" +
+                           std::to_string(options.scores) + "\x1f" +
+                           std::to_string(options.verifyDerived);
+    for (auto d : options.derived)
+        identity += "\x1f" + std::to_string(d.first) + ":" + std::to_string(d.second);
+    const std::string runKey = hex64(fnv1a(identity));
+    Options writerOptions = options;
+    writerOptions.stagingPath = output + ".v10-partial-" + runKey;
+    writerOptions.resumeKey = runKey;
     // Keep the workspace alive until after the pool has joined every worker.
-    TempWorkspace workspace(options.tmpDir);
+    Workspace workspace(options.tmpDir, runKey);
     auto pool = std::make_shared<ThreadPool>(options.threads);
-    Writer writer(output, h, options, pool);
+    Writer writer(output, h, writerOptions, pool);
     std::deque<std::future<PreparedMatrix>> pending;
     auto consume = [&]() {
         PreparedMatrix prepared = pending.front().get();
@@ -701,16 +746,33 @@ void convert(const std::string &input, const std::string &output, const Options 
             return result;
         });
     };
-    for (auto &matrix : matrices) {
-        pending.push_back(pool->submit(
-            [input, matrix = std::move(matrix), &h, options, directory = workspace.path]() mutable {
+    size_t skipped = 0;
+    for (auto &matrix : matrices)
+        if (writer.completed(matrix.a, matrix.b))
+            ++skipped;
+    if (skipped)
+        std::fprintf(stderr, "Skipping %zu of %zu chromosome pairs already staged\n", skipped,
+                     matrices.size());
+    try {
+        for (auto &matrix : matrices) {
+            if (writer.completed(matrix.a, matrix.b))
+                continue;
+            pending.push_back(pool->submit([input, matrix = std::move(matrix), &h, options,
+                                            directory = workspace.path]() mutable {
                 return prepareMatrix(input, std::move(matrix), h, options, directory);
             }));
-        if (pending.size() >= readAhead)
+            if (pending.size() >= readAhead)
+                consume();
+        }
+        while (!pending.empty())
             consume();
+        writer.finish(vectors);
+    } catch (...) {
+        std::fprintf(stderr,
+                     "Staged output kept at %s; rerun the same command to resume"
+                     " (add --no-resume to start over)\n",
+                     writerOptions.stagingPath.c_str());
+        throw;
     }
-    while (!pending.empty())
-        consume();
-    writer.finish(vectors);
 }
 } // namespace hic10

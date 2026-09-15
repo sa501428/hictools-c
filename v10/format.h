@@ -95,6 +95,26 @@ inline uint32_t rotated_block_number(uint32_t x, uint32_t y, uint32_t block_bins
     uint64_t along = (uint64_t(x) + y) / (uint64_t(2) * block_bins);
     return narrow(depth * columns + along);
 }
+// Stable across builds and platforms: resume keys are compared against values
+// written by an earlier process, so this cannot use std::hash.
+inline uint64_t fnv1a(const void *data, size_t n, uint64_t seed = 14695981039346656037ULL) {
+    auto bytes = static_cast<const unsigned char *>(data);
+    uint64_t h = seed;
+    for (size_t i = 0; i < n; ++i) {
+        h ^= bytes[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+inline uint64_t fnv1a(const std::string &s, uint64_t seed = 14695981039346656037ULL) {
+    return fnv1a(s.data(), s.size(), seed);
+}
+inline std::string hex64(uint64_t value) {
+    std::string out(16, '0');
+    for (unsigned i = 0; i < 16; ++i)
+        out[15 - i] = "0123456789abcdef"[(value >> (4 * i)) & 15];
+    return out;
+}
 inline uint32_t bits(float x) {
     uint32_t b;
     std::memcpy(&b, &x, 4);
@@ -222,6 +242,14 @@ struct Options {
     std::string tmpDir = "/tmp";
     std::vector<std::pair<uint32_t, uint32_t>> derived;
     bool scores = false, verifyDerived = true;
+    // Resumable staging. When stagingPath is set the writer builds the output at
+    // that fixed path beside the destination and journals every chromosome pair
+    // it has made durable, so an interrupted run restarts at the first pair it
+    // never finished. resumeKey identifies the run (source file identity plus
+    // every option that changes the bytes written); a journal carrying a
+    // different key is discarded rather than reused.
+    std::string stagingPath, resumeKey;
+    bool resume = true;
 };
 class Writer {
   public:
@@ -234,13 +262,17 @@ class Writer {
     // chromosome-pair resolution plus the logical blocks queued for compression.
     void matrix(uint32_t chr1, uint32_t chr2, const std::function<Matrix(uint8_t, uint32_t)> &load);
     void finish(const std::vector<Vector> &vectors);
+    // True when a resumed journal already holds this pair; the caller must then
+    // skip it instead of decoding and writing it a second time.
+    bool completed(uint32_t chr1, uint32_t chr2) const;
     const Header &header() const {
         return header_;
     }
 
   private:
     FILE *file_ = nullptr;
-    std::string output_, temporary_;
+    std::string output_, temporary_, journal_;
+    bool keepTemporary_ = false;
     Header header_;
     Options options_;
     std::shared_ptr<ThreadPool> pool_;
@@ -252,6 +284,9 @@ class Writer {
     uint64_t position() const;
     uint64_t write(const Bytes &bytes);
     void patch(uint64_t pos, const Bytes &bytes);
+    bool restore(const Bytes &header);
+    void startJournal(const Bytes &header);
+    void record(uint32_t a, uint32_t b, uint64_t pos, uint64_t len);
 };
 void convert(const std::string &input, const std::string &output, const Options &options);
 } // namespace hic10

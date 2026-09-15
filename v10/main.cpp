@@ -21,6 +21,10 @@ static void usage() {
            "  --scores           Force SCORE_FLOAT32, even for integral values\n"
            "  -T DIR             Run-scoped spool parent; automatically cleaned (default /tmp)\n"
            "  --read-ahead N     Maximum outstanding chromosome pairs (default: -t)\n\n"
+           "Convert options:\n"
+           "  --no-resume        Ignore any staged output from an interrupted run\n"
+           "                     Otherwise convert stages <output>.v10-partial-<key> beside\n"
+           "                     the output and resumes at the first unfinished pair\n\n"
            "Pre options (same parsers and MAPQ filtering as hic_pre):\n"
            "  -r N,N,...         BP resolutions (default: existing V9 resolution set)\n"
            "  -q N               Minimum MAPQ (default 0)\n"
@@ -74,6 +78,8 @@ int main(int argc, char **argv) {
             }
             if (command != "addnorm" && arg == "--scores")
                 opts.scores = true;
+            else if (command == "convert" && arg == "--no-resume")
+                opts.resume = false;
             else if (command != "addnorm" && arg == "-t") {
                 auto n = number(value());
                 hic10::check(n > 0 && n <= 256,
