@@ -22,16 +22,19 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp)
         chrom = p/'chrom.sizes'; chrom.write_text('chr1\t10000\nchr2\t7500\n')
-        rows = [('chr1', 100, 'chr1', 250), ('chr1', 100, 'chr1', 250),
+        rows = [('chr1', 0, 'chr1', 0), ('chr1', 1, 'chr1', 1),
+                ('chr1', 100, 'chr1', 250), ('chr1', 100, 'chr1', 250),
                 ('chr1', 300, 'chr1', 450), ('chr1', 9999, 'chr1', 9999),
-                ('chr1', 150, 'chr2', 300), ('chr2', 50, 'chr2', 250)]
+                ('chr1', 10000, 'chr1', 10000),
+                ('chr1', 150, 'chr2', 300), ('chr1', 10000, 'chr2', 7500),
+                ('chr2', 50, 'chr2', 250), ('chr2', 7500, 'chr2', 7500)]
         layouts = {
             'extra.txt': '\n'.join(f'{a} {x} {b} {y}' for a, x, b, y in rows),
             'short.mnd': '\n'.join(f'0 {a} {x} 0 1 {b} {y} 1' for a, x, b, y in rows),
             'long.mnd': '\n'.join(f'0 {a} {x} 0 1 {b} {y} 1 60 50M A 60 50M A r1 r2' for a, x, b, y in rows),
             'input.pairs': '#columns: readID chr1 pos1 chr2 pos2 strand1 strand2 mapq1 mapq2\n' + '\n'.join(f'r {a} {x} {b} {y} + - 60 60' for a, x, b, y in rows),
         }
-        expected100 = [(1, 2, 2), (3, 4, 1), (99, 99, 1)]
+        expected100 = [(0, 0, 2), (1, 2, 2), (3, 4, 1), (99, 99, 2)]
         for name, text in layouts.items():
             path = p/name; path.write_text(text+'\n')
             out = p/(name+'.hic')
@@ -41,9 +44,9 @@ def main():
             assert h.vector_locs[0] == (0, 0) and h.vector_locs[2] == (0, 0)
             assert h.vector_locs[1][0] and h.vector_locs[1][1]
             assert h.records(0, 0, 100) == expected100
-            assert h.records(0, 0, 200) == [(0, 1, 2), (1, 2, 1), (49, 49, 1)]
-            assert h.records(0, 1, 100) == [(1, 3, 1)]
-            assert h.records(1, 1, 100) == [(0, 2, 1)]
+            assert h.records(0, 0, 200) == [(0, 0, 2), (0, 1, 2), (1, 2, 1), (49, 49, 2)]
+            assert h.records(0, 1, 100) == [(1, 3, 1), (99, 74, 1)]
+            assert h.records(1, 1, 100) == [(0, 2, 1), (74, 74, 1)]
             assert h.res[0][1][1:] == (1, 1, 0, 0)
             assert h.matrices[0, 0, 0, 100]['grid'] == 1
             assert h.matrices[0, 1, 0, 100]['grid'] == 0
@@ -51,6 +54,9 @@ def main():
             if straw:
                 assert '100\t200\t2' in run([straw, 'observed', 'NONE', out, 'chr1', 'chr1', 'BP', 100])
                 assert '300\t100\t1' in run([straw, 'observed', 'NONE', out, 'chr2', 'chr1', 'BP', 100])
+        outside = p/'outside.txt'
+        outside.write_text('chr1 10001 chr1 1\n')
+        run([v10, 'pre', '-r', '100', outside, p/'outside.hic', chrom], ok=False)
         # Native V10 expected values use the same ceil-based terminal-bin
         # geometry as the matrix. Rebuilding raw expected through addnorm must
         # therefore be bitwise stable when a chromosome ends in a partial bin.
@@ -214,7 +220,7 @@ def main():
         assert not list(p.glob('hic-v10-convert-*'))
         h = Hic(converted)
         assert h.records(1, 1, 100) == expected100
-        assert h.records(1, 1, 200) == [(0, 1, 2), (1, 2, 1), (49, 49, 1)]
+        assert h.records(1, 1, 200) == [(0, 0, 2), (0, 1, 2), (1, 2, 1), (49, 49, 2)]
         assert h.chroms[0][0] == 'ALL' and h.records(0, 0, 1)
         # Compare source norm words, including signed zeros/NaNs, without float conversion.
         data = original.read_bytes(); r = Cursor(data); r.take(16); r.string(); nvi, length = r.unpack('QQ')

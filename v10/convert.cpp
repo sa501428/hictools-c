@@ -367,10 +367,10 @@ PreparedMatrix prepareMatrix(const std::string &input, LegacyMatrix matrix, cons
                     auto cells = decode(f, block);
                     for (auto cell : cells) {
                         // V9 permits floor(length / bin) as a coordinate. When
-                        // the division is exact, that is a redundant endpoint
-                        // bin outside V10's half-open ceil(length / bin) grid.
-                        // Treat it as a legacy 1-based endpoint and fold it into
-                        // the final real bin. Anything farther out remains an
+                        // the division is exact, that is a redundant terminal
+                        // bin outside V10's finite ceil(length / bin) grid.
+                        // Fold it into the final real bin without assigning an
+                        // origin convention. Anything farther out remains an
                         // error in Writer::canonical.
                         bool migrated = false;
                         if (cell.x == columns && columnLength % bin == 0) {

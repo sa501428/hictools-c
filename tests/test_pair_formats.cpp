@@ -105,6 +105,9 @@ static void check_hbs(const fs::path& path, const Genome& genome) {
         put(count < 65535 ? count : 65535, 2);
         if (count >= 65535) put(count, 8);
     }
+    // A supplied bin start equal to the chromosome length is accepted and
+    // folded into the final real position rather than creating a phantom bin.
+    put(0, 2); put(200, 4); put(1, 2); put(100, 4); put(1, 2);
     auto save = [&](const std::vector<uint8_t>& bytes) {
         gzFile f = gzopen(path.c_str(), "wb");
         require(f != nullptr, "cannot create HBS fixture");
@@ -123,6 +126,8 @@ static void check_hbs(const fs::path& path, const Genome& genome) {
         require(pair.has_exact_count && pair.exact_count == count, "HBS lost integer precision");
         require(pair.mapq1 == 1000 && pair.mapq2 == 1000 && pair.frag2 == 1, "HBS defaults");
     }
+    require(iterator->next(pair), "missing HBS endpoint record");
+    require(pair.pos1 == 1999 && pair.pos2 == 999, "HBS endpoint was not folded");
     require(!iterator->next(pair), "extra HBS record");
     iterator->close();
     auto reject = [&]() {

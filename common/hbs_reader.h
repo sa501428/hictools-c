@@ -57,8 +57,13 @@ public:
         require(a < ids_.size() && b < ids_.size(), "chromosome ID outside table");
         auto x = number(record + 2, 4) * resolution_;
         auto y = number(record + 8, 4) * resolution_;
-        require(x < static_cast<uint64_t>(genome_.at(ids_[a]).length) &&
-                y < static_cast<uint64_t>(genome_.at(ids_[b]).length), "bin start outside chromosome");
+        const auto xLength = static_cast<uint64_t>(genome_.at(ids_[a]).length);
+        const auto yLength = static_cast<uint64_t>(genome_.at(ids_[b]).length);
+        require(x <= xLength && y <= yLength, "bin start outside chromosome");
+        // Accept a producer-supplied terminal endpoint and fold it into the
+        // final real bin. HBS does not record the source coordinate origin.
+        if (x == xLength) --x;
+        if (y == yLength) --y;
         require(x <= INT32_MAX && y <= INT32_MAX, "position exceeds builder's int32 coordinate range");
         auto count = number(record + 12, 2);
         if (count == 65535) {

@@ -40,8 +40,10 @@ bp from 100 bp, and 2 kb from 1 kb. The 500 kb level is materialized. These are
 format requirements and do not need `--derive` flags.
 
 Each normalized chromosome pair must occupy one contiguous input block, as with
-`hic_pre`. Positions must be within `[0, chromosomeLength)` after parsing;
-coordinates are consumed using the existing parsers' conventions. Each run creates
+`hic_pre`. Numeric positions are accepted in `[0, chromosomeLength]` and consumed
+as supplied, without requiring, inferring, or converting a coordinate origin. A
+position equal to `chromosomeLength` is folded into the final real bin; values
+between the endpoints are binned exactly as provided. Each run creates
 a private `hic-v10-run-*` workspace beneath `-T` (default `/tmp`). The parser closes
 each pair spool there and hands it to a bounded worker pool while it reads ahead
 into later chromosome pairs. Workers aggregate only
@@ -160,8 +162,8 @@ refer to the output header; fields unused by a kind are zero. This migration
 metadata preserves the original words, but the advertised V10 vector lengths
 follow V10 semantics. A contact in V9's redundant terminal bin (present when
 chromosome length is exactly divisible by the resolution) is folded into the
-final V10 bin; this migrates legacy 1-based endpoint coordinates to V10's
-half-open geometry. Contacts farther outside the chromosome,
+final V10 bin; this migrates legacy endpoint coordinates to V10's finite
+`ceil(length / resolution)` geometry. Contacts farther outside the chromosome,
 unsupported/malformed input, and arithmetic overflow produce errors.
 
 ## Derived resolutions

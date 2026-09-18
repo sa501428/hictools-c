@@ -144,6 +144,12 @@ little-endian Juicer formats.
 | Juicer short binary | `.bn` fixed 20-byte records | Chromosome index and position for both ends, plus a floating-point score |
 | Hi-C binary short | `.hbs.gz` compressed binary records | Header chromosome table and resolution; exact integer counts |
 
+For V10 output, numeric pair positions are accepted as supplied in the inclusive
+range `[0, chromosomeLength]`. The writer does not infer or convert a source
+coordinate origin. A position equal to `chromosomeLength` is folded into the
+final real bin so the stored matrix retains its finite `ceil(length/resolution)`
+geometry; all other accepted positions are binned directly.
+
 ### HBS compressed binary input
 
 Both `hic_pre` and `hic_v10 pre` read `.hbs.gz` exports from straw's `dump` or

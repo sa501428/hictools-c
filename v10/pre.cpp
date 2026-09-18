@@ -315,12 +315,23 @@ void pre(const std::string &input, const std::string &output, const std::string 
             continue;
         if (p.intra && pair.chr1 != pair.chr2)
             continue;
+        const int64_t length1 = genome.at(pair.chr1).length;
+        const int64_t length2 = genome.at(pair.chr2).length;
+        check(pair.pos1 >= 0 && pair.pos2 >= 0 && pair.pos1 <= length1 &&
+                  pair.pos2 <= length2,
+              "pair position outside chromosome");
+        // Pair formats use several coordinate conventions. Consume every
+        // numeric position as supplied and make no origin conversion. The one
+        // exceptional numeric endpoint, chromosomeLength, is not a real V10
+        // bin start; fold it into the final real base so all resolutions use
+        // the same finite ceil(length / resolution) matrix geometry.
+        if (pair.pos1 == length1)
+            --pair.pos1;
+        if (pair.pos2 == length2)
+            --pair.pos2;
         if (p.nearDiagonal && pair.chr1 == pair.chr2 &&
             std::abs(int64_t(pair.pos1) - pair.pos2) > 10000000)
             continue;
-        check(pair.pos1 >= 0 && pair.pos2 >= 0 && pair.pos1 < genome.at(pair.chr1).length &&
-                  pair.pos2 < genome.at(pair.chr2).length,
-              "pair position outside chromosome (V10 coordinates are half-open)");
         if (pair.chr1 > pair.chr2 || (pair.chr1 == pair.chr2 && pair.pos1 > pair.pos2)) {
             std::swap(pair.chr1, pair.chr2);
             std::swap(pair.pos1, pair.pos2);

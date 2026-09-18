@@ -16,9 +16,9 @@ def make(path, x_int=False, y_int=False, floating=False, dense=False, frag=False
     data = header
     values = [1.25, -0.0, 2.5] if floating else [1, 2, 300]
     if endpoint:
-        # V9's floor(length / bin) + 1 geometry admits bin 2 for length 20
-        # at resolution 10. V10 has two bins (0 and 1), so conversion folds
-        # this legacy 1-based endpoint into bin 1.
+        # V9's floor(length / bin) + 1 geometry admits terminal bin 2 for
+        # length 20 at resolution 10. V10 has two real bins (0 and 1), so
+        # conversion folds that redundant endpoint into bin 1.
         raw = p('iii4B', 2, 0, 0, 0, 0, 0, 1)
         raw += p('h', 2)
         raw += p('h', 1)+p('h', 1)+p('h', 0)+p('h', 3)

@@ -46,10 +46,15 @@ is followed by an **8-byte uint64 count**, which must be at least 65,535.
 Thus ordinary records use **14 bytes**, and escaped records use **22 bytes**.
 Exporters omit zero counts; readers accept them.
 
-Positions are zero-based bin starts: `position = bin_index * resolution`.
-Each start must be strictly less than its chromosome length. The final bin may
-extend past that length. Counts are raw observed NONE integer contacts, not
-normalization weights, O/E values, fragment counts, or floating-point scores.
+The record stores a matrix `bin_index`, not an original pair-level genomic
+position. Bin indices are array indices beginning at zero, and an exporter may
+display the corresponding numeric bin start as `bin_index * resolution`. HBS
+does not prescribe or record the coordinate origin of data from which the matrix
+was built. A decoder accepts a reconstructed bin start through the chromosome
+length; a value equal to the length is folded into the final real bin, while a
+greater value is invalid. The final bin may extend past the chromosome length.
+Counts are raw observed NONE integer contacts, not normalization weights, O/E
+values, fragment counts, or floating-point scores.
 
 There is no record count or terminator: records continue to the end of the
 decompressed stream. A partial record, incomplete escaped count, truncated gzip
@@ -77,4 +82,3 @@ the wire format itself can represent larger positions. V9 uses its existing
 float32 weight/storage path. V10 preserves HBS uint64 counts through parsing,
 spooling, and checked aggregation; explicit `--scores` requests float32 storage.
 Expected/normalization vectors remain floating point.
-

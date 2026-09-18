@@ -160,9 +160,8 @@ private:
         out.chr2 = genome_.index_of(fields[o+5]);
         if (out.chr1 < 0 || out.chr2 < 0) return false;
 
-        // Juicer MND coordinates are already zero-based.  In particular,
-        // merged_nodups.txt is written with the same genomic coordinates that
-        // the Java preprocessor bins directly.
+        // Preserve the producer's numeric coordinates. The consuming writer
+        // decides how chromosome endpoints map onto its matrix geometry.
         out.pos1  = std::max(0, (int)std::atol(fields[o+2]));
         out.frag1 = std::atoi(fields[o+3]);
         out.pos2  = std::max(0, (int)std::atol(fields[o+6]));
@@ -245,7 +244,7 @@ private:
         out.chr2 = genome_.index_of(f[2]);
         if (out.chr1 < 0 || out.chr2 < 0) return false;
 
-        // Match Java's SUPER_SHORT parser: coordinates are consumed as-is.
+        // Preserve the producer's numeric coordinates as supplied.
         out.pos1   = std::max(0, (int)std::atol(f[1]));
         out.pos2   = std::max(0, (int)std::atol(f[3]));
         out.strand1 = out.strand2 = 0;
@@ -354,7 +353,7 @@ private:
         out.chr2 = genome_.index_of(f[3].c_str());
         if (out.chr1 < 0 || out.chr2 < 0) return false;
 
-        // Match Java's DCIC parser: coordinates are consumed as-is.
+        // Preserve the producer's numeric coordinates as supplied.
         out.pos1 = std::max(0, (int)std::atol(f[2].c_str()));
         out.pos2 = std::max(0, (int)std::atol(f[4].c_str()));
 
