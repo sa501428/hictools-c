@@ -4,6 +4,7 @@
 #include "io.h"
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <fcntl.h>

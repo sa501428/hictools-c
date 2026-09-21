@@ -1073,6 +1073,7 @@ void write_v10(const std::string &stage_path, const std::string &build_path,
     require(options.memory_bytes >= 1024 * 1024, "writer memory budget is too small");
     require(options.block_bins && options.block_bins <= 4096, "invalid block bin minimum");
     require(options.threads > 0, "writer thread count must be positive");
+    require(options.merge_fan_in >= 2, "writer merge fan-in must be at least two");
     require(options.resolution_batch > 0, "resolution batch must be positive");
     require(options.pair_index == std::numeric_limits<size_t>::max() ||
                 options.pair_index < stage.pairs.size(),
