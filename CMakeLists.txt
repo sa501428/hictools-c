@@ -105,4 +105,5 @@ message(STATUS "CXX flags: ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}}")
 
 if(BUILD_V10)
   add_subdirectory(v10)
+  add_subdirectory(v10_large)
 endif()
