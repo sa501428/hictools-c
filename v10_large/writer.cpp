@@ -800,9 +800,13 @@ void write_v10(const std::string &stage_path, const std::string &build_path,
                   << stage.chromosomes[b].name << "\n";
         for (uint32_t ri = 0; ri < header.resolutions[0].size(); ++ri) {
             const auto &resolution = header.resolutions[0][ri];
-            auto found = build.cells.find(std::make_tuple(a, b, resolution.bin));
-            require(found != build.cells.end(), "build manifest is missing a matrix resolution");
-            const RunInfo &cells = found->second;
+            std::ostringstream materialized_prefix;
+            materialized_prefix << "materialize-p" << a << '-' << b << "-r"
+                                << resolution.bin << '-' << getpid();
+            CellMaterialization materialized = materialize_cell(
+                build, a, b, resolution.bin, temporary_directory,
+                materialized_prefix.str());
+            const RunInfo &cells = materialized.run();
             uint64_t column_bins = header.bins(a, 0, ri), row_bins = header.bins(b, 0, ri);
             bool rotated = a == b;
             auto statistics = run_statistics(cells, column_bins, row_bins, rotated);

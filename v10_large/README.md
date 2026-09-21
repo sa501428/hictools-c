@@ -35,6 +35,7 @@ multiple of it.
 ```sh
 build/hic_v10_large stage \
   --chunk-records 250000000 \
+  --progress-records 50000000 \
   input.hbs.gz stage-dir
 
 build/hic_v10_large inspect --verify stage-dir/stage.manifest
@@ -60,14 +61,14 @@ The local orchestrator is:
 R=1,2,5,10,20,50,100,200,500,1000,2000,5000,10000,25000,50000,100000,500000
 
 build/hic_v10_large build-cells -r "$R" \
-  --memory 16GiB --fan-in 128 \
+  --root-only --memory 16GiB --fan-in 128 \
   stage-dir/stage.manifest build-dir
 ```
 
 For a scheduler, print the deterministic task graph:
 
 ```sh
-build/hic_v10_large plan -r "$R" --fan-in 128 \
+build/hic_v10_large plan -r "$R" --root-only --fan-in 128 \
   stage-dir/stage.manifest build-dir
 ```
 
@@ -81,16 +82,16 @@ Run its stages in this dependency order:
 The corresponding commands are:
 
 ```sh
-build/hic_v10_large map-root -r "$R" --memory 16GiB --fan-in 128 \
+build/hic_v10_large map-root -r "$R" --root-only --memory 16GiB --fan-in 128 \
   stage-dir/stage.manifest build-dir SHARD_ID
 
-build/hic_v10_large reduce-root -r "$R" --fan-in 128 \
+build/hic_v10_large reduce-root -r "$R" --root-only --fan-in 128 \
   stage-dir/stage.manifest build-dir PAIR_ID GROUP_ID
 
-build/hic_v10_large build-pair -r "$R" --fan-in 128 \
+build/hic_v10_large build-pair -r "$R" --root-only --fan-in 128 \
   stage-dir/stage.manifest build-dir PAIR_ID
 
-build/hic_v10_large finalize-build -r "$R" \
+build/hic_v10_large finalize-build -r "$R" --root-only \
   stage-dir/stage.manifest build-dir
 ```
 
@@ -100,10 +101,19 @@ shards than `--fan-in`, `plan` adds parallel reduction groups before its final
 merge. Published task manifests make all commands idempotent. A completed pair
 reclaims its map and reduction runs only after its durable pair manifest exists.
 
-Coarser resolutions never rescan HBS. The sorted parent is consumed once; one
-coarsened row is aggregated at a time and written in canonical order. This is
-substantially cheaper than the old full input scan per resolution and avoids a
-second external sort for every rollup.
+`--root-only` is the recommended low-scratch mode. It retains only the canonical
+finest-resolution stream for each pair. Normalization and assembly materialize
+one requested coarser stream from that root, consume it, verify it, and remove
+it. Peak retained cell storage is therefore about 16 bytes per occupied finest
+cell instead of up to 16 bytes per occupied cell per resolution. The tradeoff is
+one sequential root-cell pass per requested coarser resolution in each consumer.
+
+Omit `--root-only` on every build command to select the faster, high-scratch
+mode. In that mode coarser resolutions never rescan HBS: the nearest completed
+divisor is consumed and retained in a rollup DAG. Both modes aggregate one
+coarsened row at a time in canonical order, using a sparse open-addressing row
+accumulator rather than a chromosome-width array. Neither mode externally sorts
+a coarser resolution.
 
 `--memory` is the combined size of the two radix-sort record arrays, not a
 request to allocate that amount twice. Merge readers and library buffers add a
@@ -196,9 +206,15 @@ cells remain available for norms and expected vectors.
 - Do not delete staged shards until all map tasks are complete. Do not delete
   canonical `build-dir/cells` or vector sidecars until the final `.hic` has been
   verified.
-- Peak disk can be several times the 1.6 TB staged size while root runs and a
-  merge level coexist. Size scratch for the largest chromosome pair, not just
-  for the average pair.
+- In high-scratch mode, sparse 1 bp data can remain nearly unique at many
+  resolutions. The worst-case retained cell storage for 17 resolutions is
+  about 27.2 TB per 100 billion occupied root cells, in addition to the 1.6 TB
+  stage. The one-billion-record validation sample measured 15.7x amplification
+  through all 17 resolution streams.
+- In `--root-only` mode, the corresponding retained root is at most 1.6 TB per
+  100 billion occupied cells. Allow additional scratch for one on-demand
+  rollup, the largest active merge level, writer block runs, and SCALE CSR.
+  Put `--tmp` on node-local NVMe or a high-throughput parallel filesystem.
 
 ## Numerical equivalence
 

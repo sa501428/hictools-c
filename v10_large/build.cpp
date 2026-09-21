@@ -167,14 +167,14 @@ RunInfo read_reduce_manifest(const std::string &path, uint64_t fingerprint,
 
 void write_pair_manifest(const std::string &path, uint64_t fingerprint,
                          const std::vector<uint32_t> &resolutions,
-                         const std::map<uint32_t, RunInfo> &cells) {
+                         const std::map<uint32_t, RunInfo> &cells, bool root_only) {
     std::string temporary = path + ".tmp-" + std::to_string(getpid());
     std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
     require(bool(out), "cannot create pair manifest");
     out << "HIC_V10_LARGE_PAIR 1\nsource " << hex64(fingerprint) << "\nresolutions "
         << resolutions.size();
     for (auto resolution : resolutions) out << ' ' << resolution;
-    out << "\n";
+    out << "\nstorage " << (root_only ? "root" : "all") << "\n";
     for (const auto &entry : cells) {
         const RunInfo &run = entry.second;
         out << "cell " << run.chr1 << ' ' << run.chr2 << ' ' << run.resolution << ' '
@@ -186,7 +186,8 @@ void write_pair_manifest(const std::string &path, uint64_t fingerprint,
 }
 
 std::vector<RunInfo> read_pair_manifest(const std::string &path, uint64_t fingerprint,
-                                        const std::vector<uint32_t> &resolutions) {
+                                        const std::vector<uint32_t> &resolutions,
+                                        bool root_only) {
     std::ifstream in(path, std::ios::binary);
     require(bool(in), "missing pair task result " + path);
     std::string magic, tag, hash;
@@ -203,7 +204,17 @@ std::vector<RunInfo> read_pair_manifest(const std::string &path, uint64_t finger
         require(actual == resolution, "pair resolution list mismatch");
     }
     std::vector<RunInfo> result;
-    while (in >> tag && tag == "cell") {
+    in >> tag;
+    bool stored_root_only = false;
+    if (tag == "storage") {
+        std::string storage;
+        in >> storage;
+        require(storage == "all" || storage == "root", "invalid pair storage mode");
+        stored_root_only = storage == "root";
+        in >> tag;
+    }
+    require(stored_root_only == root_only, "pair storage mode mismatch");
+    while (tag == "cell") {
         RunInfo run;
         std::string checksum;
         in >> run.chr1 >> run.chr2 >> run.resolution >> run.records >> checksum >> std::quoted(run.path);
@@ -213,8 +224,13 @@ std::vector<RunInfo> read_pair_manifest(const std::string &path, uint64_t finger
                     actual.resolution == run.resolution,
                 "pair cell artifact changed after completion");
         result.push_back(std::move(run));
+        in >> tag;
     }
-    require(tag == "end" && result.size() == resolutions.size(), "truncated pair manifest");
+    const size_t wanted = root_only ? 1 : resolutions.size();
+    require(tag == "end" && result.size() == wanted, "truncated pair manifest");
+    if (root_only)
+        require(result.front().resolution == resolutions.front(),
+                "root-only pair is missing the finest resolution");
     return result;
 }
 
@@ -361,7 +377,8 @@ void build_pair_cells(const std::string &stage_path, const std::string &director
     const PairInfo &pair = stage.pairs[pair_index];
     std::string result_path = pair_manifest_path(directory, pair.chr1, pair.chr2);
     if (path_exists(result_path)) {
-        read_pair_manifest(result_path, stage.source_fingerprint, resolutions);
+        read_pair_manifest(result_path, stage.source_fingerprint, resolutions,
+                           options.root_only);
         cleanup_pair_inputs(stage, directory, pair_index, options);
         std::cerr << "Pair task " << pair_index << " already complete\n";
         return;
@@ -371,7 +388,10 @@ void build_pair_cells(const std::string &stage_path, const std::string &director
     std::vector<uint32_t> completed;
     std::cerr << "Building cells for " << stage.chromosomes[pair.chr1].name << " x "
               << stage.chromosomes[pair.chr2].name << " (" << pair.records << " records)\n";
-    for (uint32_t resolution : resolutions) {
+    const size_t materialized_count = options.root_only ? 1 : resolutions.size();
+    for (size_t resolution_index = 0; resolution_index < materialized_count;
+         ++resolution_index) {
+        uint32_t resolution = resolutions[resolution_index];
         std::string resolution_prefix = prefix + "-r" + std::to_string(resolution);
         RunInfo merged;
         if (resolution == resolutions.front()) {
@@ -402,7 +422,8 @@ void build_pair_cells(const std::string &stage_path, const std::string &director
         completed.push_back(resolution);
         std::cerr << "  " << resolution << " bp: " << merged.records << " occupied cells\n";
     }
-    write_pair_manifest(result_path, stage.source_fingerprint, resolutions, cells);
+    write_pair_manifest(result_path, stage.source_fingerprint, resolutions, cells,
+                        options.root_only);
     // Once the durable pair manifest exists, root map runs are superseded by
     // the canonical finest-resolution cell file and can be reclaimed safely.
     cleanup_pair_inputs(stage, directory, pair_index, options);
@@ -418,10 +439,11 @@ void finalize_build(const std::string &stage_path, const std::string &directory,
     out << "HIC_V10_LARGE_BUILD 1\nstage " << std::quoted(stage_path) << ' '
         << hex64(stage.source_fingerprint) << "\nresolutions " << resolutions.size();
     for (auto resolution : resolutions) out << ' ' << resolution;
-    out << "\n";
+    out << "\nstorage " << (options.root_only ? "root" : "all") << "\n";
     for (const PairInfo &pair : stage.pairs) {
         auto cells = read_pair_manifest(pair_manifest_path(directory, pair.chr1, pair.chr2),
-                                        stage.source_fingerprint, resolutions);
+                                        stage.source_fingerprint, resolutions,
+                                        options.root_only);
         for (const RunInfo &run : cells)
             out << "cell " << run.chr1 << ' ' << run.chr2 << ' ' << run.resolution << ' '
                 << run.records << ' ' << hex64(run.checksum) << ' ' << std::quoted(run.path) << "\n";
@@ -469,6 +491,11 @@ BuildManifest read_build_manifest(const std::string &path, bool inspect_files) {
             in >> expected_resolutions;
             result.resolutions.resize(expected_resolutions);
             for (auto &resolution : result.resolutions) in >> resolution;
+        } else if (tag == "storage") {
+            std::string storage;
+            in >> storage;
+            require(storage == "all" || storage == "root", "invalid build storage mode");
+            result.root_only = storage == "root";
         } else if (tag == "cell") {
             uint32_t a = 0, b = 0, resolution = 0;
             uint64_t records = 0;
@@ -491,10 +518,66 @@ BuildManifest read_build_manifest(const std::string &path, bool inspect_files) {
         }
         require(bool(in), "truncated build manifest " + path);
     }
-    require(!result.stage_manifest.empty() && result.resolutions.size() == expected_resolutions &&
-                !result.cells.empty(),
+    require(!result.stage_manifest.empty() && !result.resolutions.empty() &&
+                result.resolutions.size() == expected_resolutions && !result.cells.empty(),
             "incomplete build manifest " + path);
+    require(std::is_sorted(result.resolutions.begin(), result.resolutions.end()) &&
+                std::adjacent_find(result.resolutions.begin(), result.resolutions.end()) ==
+                    result.resolutions.end(),
+            "invalid build resolution order");
+    for (const auto &entry : result.cells) {
+        uint32_t resolution = std::get<2>(entry.first);
+        require(std::binary_search(result.resolutions.begin(), result.resolutions.end(), resolution),
+                "cell resolution is not advertised by build manifest");
+        require(!result.root_only || resolution == result.resolutions.front(),
+                "root-only build contains a non-root cell");
+    }
     return result;
+}
+
+CellMaterialization::CellMaterialization(RunInfo run, std::string owned_path)
+    : run_(std::move(run)), owned_path_(std::move(owned_path)) {}
+
+CellMaterialization::~CellMaterialization() {
+    if (!owned_path_.empty()) std::remove(owned_path_.c_str());
+}
+
+CellMaterialization::CellMaterialization(CellMaterialization &&other) noexcept
+    : run_(std::move(other.run_)), owned_path_(std::move(other.owned_path_)) {
+    other.owned_path_.clear();
+}
+
+CellMaterialization &CellMaterialization::operator=(CellMaterialization &&other) noexcept {
+    if (this != &other) {
+        if (!owned_path_.empty()) std::remove(owned_path_.c_str());
+        run_ = std::move(other.run_);
+        owned_path_ = std::move(other.owned_path_);
+        other.owned_path_.clear();
+    }
+    return *this;
+}
+
+bool has_pair_cells(const BuildManifest &build, uint32_t chr1, uint32_t chr2) {
+    auto begin = build.cells.lower_bound(std::make_tuple(chr1, chr2, uint32_t(0)));
+    return begin != build.cells.end() && std::get<0>(begin->first) == chr1 &&
+           std::get<1>(begin->first) == chr2;
+}
+
+CellMaterialization materialize_cell(const BuildManifest &build, uint32_t chr1,
+                                     uint32_t chr2, uint32_t resolution,
+                                     const std::string &temporary_directory,
+                                     const std::string &prefix) {
+    auto direct = build.cells.find(std::make_tuple(chr1, chr2, resolution));
+    if (direct != build.cells.end()) return CellMaterialization(direct->second, {});
+    require(build.root_only, "build manifest is missing a matrix resolution");
+    auto root = build.cells.find(std::make_tuple(chr1, chr2, build.resolutions.front()));
+    require(root != build.cells.end(), "root-only build is missing a chromosome pair");
+    require(resolution > root->second.resolution &&
+                resolution % root->second.resolution == 0,
+            "cannot derive requested resolution from root cells");
+    make_directory(temporary_directory);
+    RunInfo rolled = rollup_cell_file(root->second, temporary_directory, resolution, prefix);
+    return CellMaterialization(rolled, rolled.path);
 }
 
 } // namespace hic10large

@@ -29,8 +29,9 @@ error exit.
 For 1 bp and 100-billion-record HBS builds, the separate
 [`hic_v10_large`](v10_large/README.md) executable provides bounded-memory
 external radix sort, resumable map/reduce tasks, streaming resolution rollups,
-disk-backed SCALE, distributed expected-value tasks, and transactional V10
-assembly without changing the existing `hic_v10 pre` path.
+an optional root-only low-scratch mode, disk-backed SCALE, distributed
+expected-value tasks, and transactional V10 assembly without changing the
+existing `hic_v10 pre` path.
 
 ## Requirements
 

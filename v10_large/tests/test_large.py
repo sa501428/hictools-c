@@ -122,6 +122,23 @@ def main():
         assert hic.vector_locs == [(0, 0), (0, 0), (0, 0)]
         assert not list((build / "block-work").glob("*"))
 
+        # Low-scratch mode retains only the finest cells. Writer and
+        # normalization tasks roll up one requested resolution at a time and
+        # retire the temporary run immediately.
+        root_build = root / "root-build"
+        run([executable, "build-cells", "-r", "1,2,4", "--root-only",
+             "--memory", "1MiB", stage / "stage.manifest", root_build])
+        assert len(list((root_build / "cells").glob("*-cells.h10r"))) == 3
+        root_output = root / "root-only.hic"
+        run([executable, "write", "--genome", "tiny", "--memory", "1MiB",
+             stage / "stage.manifest", root_build / "build.manifest", root_output])
+        root_hic = Hic(root_output)
+        for pair in ((0, 0), (0, 1), (1, 1)):
+            for resolution in (1, 2, 4):
+                assert root_hic.records(*pair, resolution) == \
+                       hic.records(*pair, resolution)
+        assert not list((root_build / "block-work").glob("materialize-*.h10r"))
+
         vectors = root / "vectors"
         norm_plan = run([executable, "plan-normalize", "--no-scale",
                          stage / "stage.manifest", build / "build.manifest", vectors])
@@ -152,6 +169,20 @@ def main():
             assert len(hic.vectors[1, None, None, 0, resolution][0]) == bins
             assert len(hic.vectors[2, "VC", None, 0, resolution][0]) == bins
             assert len(hic.vectors[2, "VC_SQRT", None, 0, resolution][0]) == bins
+
+        root_vectors = root / "root-vectors"
+        run([executable, "normalize", "--no-scale", "--memory", "1MiB",
+             stage / "stage.manifest", root_build / "build.manifest", root_vectors])
+        root_normalized = root / "root-normalized.hic"
+        run([executable, "write", "--genome", "tiny", "--memory", "1MiB",
+             "--vectors", root_vectors / "vectors.manifest",
+             stage / "stage.manifest", root_build / "build.manifest", root_normalized])
+        root_norm_hic = Hic(root_normalized)
+        assert set(root_norm_hic.vectors) == set(hic.vectors)
+        for key in hic.vectors:
+            close_words(root_norm_hic.vectors[key][0], hic.vectors[key][0])
+            assert dict(root_norm_hic.vectors[key][1]) == dict(hic.vectors[key][1])
+        assert not list(root_vectors.rglob("materialize-*.h10r"))
 
         chromosome_sizes = root / "chrom.sizes"
         chromosome_sizes.write_text("chr1\t20\nchr2\t12\n")

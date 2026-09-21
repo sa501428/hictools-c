@@ -37,6 +37,70 @@ void emit_chunk(std::vector<CellRecord> &chunk, std::vector<RunInfo> &runs,
     chunk.clear();
 }
 
+// A coarse output row is usually sparse even when the chromosome has hundreds
+// of millions of 1 bp bins.  Keep only touched columns instead of allocating a
+// chromosome-width uint64_t array for every rollup task.
+class SparseRow {
+  public:
+    void add(uint32_t key, uint64_t value) {
+        if (slots_.empty()) rehash(16);
+        if ((used_ + 1) * 10 >= slots_.size() * 7) rehash(slots_.size() * 2);
+        size_t at = locate(key);
+        if (slots_[at].key == EMPTY) {
+            slots_[at] = {key, value};
+            touched_.push_back(key);
+            ++used_;
+        } else {
+            require(value <= UINT64_MAX - slots_[at].value,
+                    "cell count exceeds uint64 during streaming rollup");
+            slots_[at].value += value;
+        }
+    }
+
+    template <class Emit> void flush(Emit emit) {
+        std::sort(touched_.begin(), touched_.end());
+        std::vector<size_t> occupied;
+        occupied.reserve(touched_.size());
+        for (uint32_t key : touched_) {
+            size_t at = locate(key);
+            require(slots_[at].key == key && slots_[at].value,
+                    "invalid sparse rollup row");
+            emit(key, slots_[at].value);
+            occupied.push_back(at);
+        }
+        // Open-addressed probe chains must remain intact until all lookups for
+        // this row are complete.
+        for (size_t at : occupied) slots_[at] = {};
+        touched_.clear();
+        used_ = 0;
+    }
+
+  private:
+    static constexpr uint32_t EMPTY = UINT32_MAX;
+    struct Slot {
+        uint32_t key = EMPTY;
+        uint64_t value = 0;
+    };
+    size_t locate(uint32_t key) const {
+        size_t at = (uint64_t(key) * 11400714819323198485ULL) & (slots_.size() - 1);
+        while (slots_[at].key != EMPTY && slots_[at].key != key)
+            at = (at + 1) & (slots_.size() - 1);
+        return at;
+    }
+    void rehash(size_t size) {
+        std::vector<Slot> old = std::move(slots_);
+        slots_.assign(size, {});
+        for (const Slot &slot : old) {
+            if (slot.key == EMPTY) continue;
+            size_t at = locate(slot.key);
+            slots_[at] = slot;
+        }
+    }
+    std::vector<Slot> slots_;
+    std::vector<uint32_t> touched_;
+    size_t used_ = 0;
+};
+
 } // namespace
 
 std::array<unsigned char, RUN_HEADER_BYTES> encode_run_header(const RunInfo &r) {
@@ -323,18 +387,14 @@ RunInfo rollup_cell_file(const RunInfo &source,
                      source.chr1, source.chr2, output_resolution);
     RunReader reader(source);
     CellRecord record;
-    std::vector<uint64_t> row_counts;
-    std::vector<uint32_t> touched;
+    SparseRow row;
     uint32_t active_row = 0;
     bool have_row = false;
     auto flush_row = [&]() {
         if (!have_row) return;
-        std::sort(touched.begin(), touched.end());
-        for (uint32_t x : touched) {
-            output.add({x, active_row, row_counts[x]});
-            row_counts[x] = 0;
-        }
-        touched.clear();
+        row.flush([&](uint32_t x, uint64_t count) {
+            output.add({x, active_row, count});
+        });
     };
     while (reader.next(record)) {
         const uint32_t y = record.y / factor;
@@ -345,11 +405,7 @@ RunInfo rollup_cell_file(const RunInfo &source,
             active_row = y;
             have_row = true;
         }
-        if (x >= row_counts.size()) row_counts.resize(uint64_t(x) + 1);
-        if (!row_counts[x]) touched.push_back(x);
-        require(record.count <= UINT64_MAX - row_counts[x],
-                "cell count exceeds uint64 during streaming rollup");
-        row_counts[x] += record.count;
+        row.add(x, record.count);
     }
     flush_row();
     return output.finish();

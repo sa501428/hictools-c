@@ -15,15 +15,16 @@ namespace {
 void usage() {
     std::cout
         << "Usage:\n"
-           "  hic_v10_large stage [--chunk-records N] <input.hbs.gz> <work-dir>\n"
+           "  hic_v10_large stage [--chunk-records N] [--progress-records N]\n"
+           "      <input.hbs.gz> <work-dir>\n"
            "  hic_v10_large inspect [--verify] <work-dir/stage.manifest>\n\n"
-           "  hic_v10_large build-cells -r N,N,... [--memory SIZE] [--fan-in N]\n"
+           "  hic_v10_large build-cells -r N,N,... [--root-only] [--memory SIZE] [--fan-in N]\n"
            "      <stage.manifest> <build-dir>\n\n"
-           "  hic_v10_large plan -r N,N,... [--fan-in N] <stage.manifest> <build-dir>\n"
+           "  hic_v10_large plan -r N,N,... [--root-only] [--fan-in N] <stage.manifest> <build-dir>\n"
            "  hic_v10_large map-root -r N,N,... [--memory SIZE] [--fan-in N] <stage.manifest> <build-dir> <shard-id>\n"
            "  hic_v10_large reduce-root -r N,N,... [--fan-in N] <stage.manifest> <build-dir> <pair-id> <group-id>\n"
-           "  hic_v10_large build-pair -r N,N,... [--memory SIZE] <stage.manifest> <build-dir> <pair-id>\n"
-           "  hic_v10_large finalize-build -r N,N,... <stage.manifest> <build-dir>\n\n"
+           "  hic_v10_large build-pair -r N,N,... [--root-only] [--memory SIZE] <stage.manifest> <build-dir> <pair-id>\n"
+           "  hic_v10_large finalize-build -r N,N,... [--root-only] <stage.manifest> <build-dir>\n\n"
            "  hic_v10_large write [--genome NAME] [--memory SIZE] [--tmp DIR] [-t N]\n"
            "      [--vectors vectors.manifest]\n"
            "      [--derive TARGET:SOURCE] <stage.manifest> <build.manifest> <output.hic>\n\n"
@@ -134,6 +135,8 @@ int main(int argc, char **argv) {
                 } else if (arg == "--fan-in") {
                     require(i + 1 < argc, "missing value for --fan-in");
                     options.merge_fan_in = static_cast<size_t>(number(argv[++i]));
+                } else if (arg == "--root-only") {
+                    options.root_only = true;
                 } else {
                     require(arg.empty() || arg[0] != '-', "unknown option " + arg);
                     args.push_back(arg);

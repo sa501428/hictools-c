@@ -326,9 +326,12 @@ void normalize_chromosome(const std::string &stage_path, const std::string &buil
     for (size_t reverse = build.resolutions.size(); reverse-- > 0;) {
         const uint32_t ri = static_cast<uint32_t>(reverse);
         const uint32_t resolution = build.resolutions[ri];
-        auto found = build.cells.find(std::make_tuple(chr, chr, resolution));
-        if (found == build.cells.end()) continue;
-        const RunInfo &cells = found->second;
+        if (!has_pair_cells(build, chr, chr)) continue;
+        CellMaterialization materialized = materialize_cell(
+            build, chr, chr, resolution, temporary,
+            "normalize-c" + std::to_string(chr) + "-r" +
+                std::to_string(resolution));
+        const RunInfo &cells = materialized.run();
         const uint32_t bins = chromosome_bins(stage.chromosomes[chr].length, resolution);
         std::cerr << "Normalizing " << stage.chromosomes[chr].name << " at "
                   << resolution << " bp\n";
@@ -409,6 +412,11 @@ void expected_resolution(const std::string &stage_path, const std::string &build
         }
     }
     const uint32_t resolution = build.resolutions[ri];
+    std::string temporary_root = options.temporary_directory.empty()
+        ? join_path(directory, "materialize-work") : options.temporary_directory;
+    std::string temporary = join_path(temporary_root, "expected-r" + std::to_string(ri));
+    make_directory(temporary_root);
+    make_directory(temporary);
     uint32_t maximum_bins = 0;
     for (const auto &chromosome : stage.chromosomes)
         maximum_bins = std::max(maximum_bins, chromosome_bins(chromosome.length, resolution));
@@ -418,10 +426,14 @@ void expected_resolution(const std::string &stage_path, const std::string &build
     for (size_t norm = 0; norm < manifest.norms.size(); ++norm)
         expected.emplace_back(new NormalizedExpected(maximum_bins));
     for (uint32_t chr = 0; chr < stage.chromosomes.size(); ++chr) {
-        auto cell_it = build.cells.find(std::make_tuple(chr, chr, resolution));
-        if (cell_it == build.cells.end()) continue;
+        if (!has_pair_cells(build, chr, chr)) continue;
+        CellMaterialization materialized = materialize_cell(
+            build, chr, chr, resolution, temporary,
+            "expected-c" + std::to_string(chr) + "-r" +
+                std::to_string(resolution));
+        const RunInfo &cells = materialized.run();
         const uint32_t bins = chromosome_bins(stage.chromosomes[chr].length, resolution);
-        raw.add(chr, cell_it->second, bins);
+        raw.add(chr, cells, bins);
         for (uint32_t norm = 0; norm < manifest.norms.size(); ++norm) {
             auto vector_it = norms.find(std::make_tuple(norm, chr));
             if (vector_it == norms.end()) continue;
@@ -430,7 +442,7 @@ void expected_resolution(const std::string &stage_path, const std::string &build
             std::vector<uint32_t> words = input.read(0, bins);
             std::vector<float> values(bins);
             std::transform(words.begin(), words.end(), values.begin(), bits_float);
-            expected[norm]->add(chr, cell_it->second, bins, values);
+            expected[norm]->add(chr, cells, bins, values);
         }
     }
     if (raw.has_data()) manifest.vectors.push_back(raw.finish(ri, resolution, directory));
