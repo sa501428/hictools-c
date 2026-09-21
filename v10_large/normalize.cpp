@@ -6,6 +6,7 @@
 #include "sort.h"
 #include "vectors.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -60,6 +61,15 @@ std::string expected_manifest_path(const std::string &directory, uint32_t resolu
     return join_path(directory, out.str());
 }
 
+std::string cached_cell_path(const std::string &directory, uint64_t source_fingerprint,
+                             uint32_t chromosome, uint32_t resolution) {
+    std::ostringstream out;
+    out << "cell-f" << std::hex << source_fingerprint << std::dec
+        << "-c" << std::setfill('0') << std::setw(5) << chromosome
+        << "-r" << std::setw(10) << resolution << ".h10r";
+    return join_path(join_path(directory, "rollup-cache"), out.str());
+}
+
 VectorManifest configured_manifest(uint64_t source_fingerprint, const NormalizeOptions &options) {
     VectorManifest result;
     result.source_fingerprint = source_fingerprint;
@@ -95,22 +105,28 @@ bool valid_norm(const std::vector<float> &values) {
     return false;
 }
 
-float rescale_norm(const RunInfo &cells, std::vector<float> &norm) {
+void rescale_norms(const RunInfo &cells, const std::vector<std::vector<float> *> &norms) {
+    if (norms.empty()) return;
     RunReader reader(cells);
     CellRecord cell;
-    long double raw = 0, normalized = 0;
+    long double raw = 0;
+    std::vector<long double> normalized(norms.size(), 0);
     while (reader.next(cell)) {
-        float a = norm[cell.x], b = norm[cell.y];
-        if (!(a > 0) || !(b > 0) || !std::isfinite(a) || !std::isfinite(b)) continue;
         long double multiple = cell.x == cell.y ? 1 : 2;
         raw += multiple * cell.count;
-        normalized += multiple * cell.count / (static_cast<long double>(a) * b);
+        for (size_t n = 0; n < norms.size(); ++n) {
+            const float a = (*norms[n])[cell.x], b = (*norms[n])[cell.y];
+            if (!(a > 0) || !(b > 0) || !std::isfinite(a) || !std::isfinite(b)) continue;
+            normalized[n] += multiple * cell.count / (static_cast<long double>(a) * b);
+        }
     }
-    if (!(raw > 0) || !(normalized > 0)) return 0;
-    float factor = static_cast<float>(std::sqrt(normalized / raw));
-    for (float &value : norm)
-        if (value > 0 && std::isfinite(value)) value *= factor;
-    return factor;
+    if (!(raw > 0)) return;
+    for (size_t n = 0; n < norms.size(); ++n) {
+        if (!(normalized[n] > 0)) continue;
+        const float factor = static_cast<float>(std::sqrt(normalized[n] / raw));
+        for (float &value : *norms[n])
+            if (value > 0 && std::isfinite(value)) value *= factor;
+    }
 }
 
 std::vector<uint32_t> length_order(const std::map<uint32_t, uint32_t> &bins,
@@ -142,17 +158,19 @@ struct RawExpected {
     std::vector<U128> actual;
     std::map<uint32_t, U128> observed;
     std::map<uint32_t, uint32_t> bins;
-    void add(uint32_t chr, const RunInfo &cells, uint32_t chromosome_bins) {
+    uint32_t active_chr = 0;
+    U128 active_total = 0;
+    void begin(uint32_t chr, uint32_t chromosome_bins) {
         bins[chr] = chromosome_bins;
-        U128 total = 0;
-        RunReader reader(cells);
-        CellRecord cell;
-        while (reader.next(cell)) {
-            uint32_t distance = cell.y - cell.x;
-            actual[distance] = checked_add(actual[distance], cell.count);
-            total = checked_add(total, cell.count);
-        }
-        if (total) observed[chr] = checked_add(observed[chr], total);
+        active_chr = chr;
+        active_total = 0;
+    }
+    void add(const CellRecord &cell) {
+        actual[cell.y - cell.x] = checked_add(actual[cell.y - cell.x], cell.count);
+        active_total = checked_add(active_total, cell.count);
+    }
+    void end() {
+        if (active_total) observed[active_chr] = checked_add(observed[active_chr], active_total);
     }
     bool has_data() const { return !observed.empty(); }
     VectorInfo finish(uint32_t ri, uint32_t resolution, const std::string &directory) {
@@ -217,21 +235,23 @@ struct NormalizedExpected {
     std::vector<long double> actual;
     std::map<uint32_t, long double> observed;
     std::map<uint32_t, uint32_t> bins;
-    void add(uint32_t chr, const RunInfo &cells, uint32_t chromosome_bins,
-             const std::vector<float> &norm) {
+    uint32_t active_chr = 0;
+    long double active_total = 0;
+    void begin(uint32_t chr, uint32_t chromosome_bins) {
         bins[chr] = chromosome_bins;
-        long double total = 0;
-        RunReader reader(cells);
-        CellRecord cell;
-        while (reader.next(cell)) {
-            float a = norm[cell.x], b = norm[cell.y];
-            if (!(a > 0) || !(b > 0) || !std::isfinite(a) || !std::isfinite(b)) continue;
-            long double value = static_cast<long double>(cell.count) /
-                                (static_cast<long double>(a) * b);
-            actual[cell.y - cell.x] += value;
-            total += value;
-        }
-        if (total > 0) observed[chr] += total;
+        active_chr = chr;
+        active_total = 0;
+    }
+    void add(const CellRecord &cell, const std::vector<float> &norm) {
+        const float a = norm[cell.x], b = norm[cell.y];
+        if (!(a > 0) || !(b > 0) || !std::isfinite(a) || !std::isfinite(b)) return;
+        const long double value = static_cast<long double>(cell.count) /
+                                  (static_cast<long double>(a) * b);
+        actual[cell.y - cell.x] += value;
+        active_total += value;
+    }
+    void end() {
+        if (active_total > 0) observed[active_chr] += active_total;
     }
     bool has_data() const { return !observed.empty(); }
     VectorInfo finish(uint32_t norm, uint32_t ri, uint32_t resolution,
@@ -320,10 +340,15 @@ void normalize_chromosome(const std::string &stage_path, const std::string &buil
     const uint32_t vcs_id = norm_id(manifest, "VC_SQRT");
     const uint32_t scale_id = norm_id(manifest, "SCALE");
     bool scale_active = options.scale;
+    std::vector<float> previous_scale;
+    uint32_t previous_scale_resolution = 0;
+    double previous_excluded_fraction = 0;
+    if (options.cache_rollups) make_directory(join_path(directory, "rollup-cache"));
 
     // SCALE failure propagates toward finer bins, so resolutions are processed
     // from largest bin size to smallest.
     for (size_t reverse = build.resolutions.size(); reverse-- > 0;) {
+        const auto resolution_begin = std::chrono::steady_clock::now();
         const uint32_t ri = static_cast<uint32_t>(reverse);
         const uint32_t resolution = build.resolutions[ri];
         if (!has_pair_cells(build, chr, chr)) continue;
@@ -332,6 +357,7 @@ void normalize_chromosome(const std::string &stage_path, const std::string &buil
             "normalize-c" + std::to_string(chr) + "-r" +
                 std::to_string(resolution));
         const RunInfo &cells = materialized.run();
+        const auto materialized_at = std::chrono::steady_clock::now();
         const uint32_t bins = chromosome_bins(stage.chromosomes[chr].length, resolution);
         std::cerr << "Normalizing " << stage.chromosomes[chr].name << " at "
                   << resolution << " bp\n";
@@ -343,22 +369,29 @@ void normalize_chromosome(const std::string &stage_path, const std::string &buil
             coverage[cell.x] = checked_add(coverage[cell.x], cell.count);
             if (cell.x != cell.y) coverage[cell.y] = checked_add(coverage[cell.y], cell.count);
         }
-        if (options.vc) {
-            std::vector<float> norm(bins);
-            for (uint32_t i = 0; i < bins; ++i)
-                norm[i] = static_cast<float>(as_long_double(coverage[i]));
-            rescale_norm(cells, norm);
-            if (valid_norm(norm))
-                manifest.vectors.push_back(write_norm(vc_id, chr, ri, resolution, norm, directory));
+        const auto coverage_at = std::chrono::steady_clock::now();
+        std::vector<float> vc_norm, vcs_norm;
+        std::vector<double> raw_vc;
+        if (options.vc) vc_norm.resize(bins);
+        if (options.vc_sqrt) vcs_norm.resize(bins);
+        if (scale_active) raw_vc.resize(bins);
+        for (uint32_t i = 0; i < bins; ++i) {
+            const long double value = as_long_double(coverage[i]);
+            if (options.vc) vc_norm[i] = static_cast<float>(value);
+            if (options.vc_sqrt) vcs_norm[i] = std::sqrt(static_cast<float>(value));
+            if (scale_active) raw_vc[i] = static_cast<double>(value);
         }
-        if (options.vc_sqrt) {
-            std::vector<float> norm(bins);
-            for (uint32_t i = 0; i < bins; ++i)
-                norm[i] = std::sqrt(static_cast<float>(as_long_double(coverage[i])));
-            rescale_norm(cells, norm);
-            if (valid_norm(norm))
-                manifest.vectors.push_back(write_norm(vcs_id, chr, ri, resolution, norm, directory));
-        }
+        std::vector<std::vector<float> *> rescale;
+        if (options.vc) rescale.push_back(&vc_norm);
+        if (options.vc_sqrt) rescale.push_back(&vcs_norm);
+        rescale_norms(cells, rescale);
+        if (options.vc && valid_norm(vc_norm))
+            manifest.vectors.push_back(write_norm(vc_id, chr, ri, resolution, vc_norm, directory));
+        if (options.vc_sqrt && valid_norm(vcs_norm))
+            manifest.vectors.push_back(write_norm(vcs_id, chr, ri, resolution, vcs_norm, directory));
+        const auto simple_norms_at = std::chrono::steady_clock::now();
+        std::vector<float>().swap(vc_norm);
+        std::vector<float>().swap(vcs_norm);
         // Release the 128-bit exact coverage array before constructing SCALE's
         // CSR and iterative working vectors.
         std::vector<U128>().swap(coverage);
@@ -366,18 +399,43 @@ void normalize_chromosome(const std::string &stage_path, const std::string &buil
             ScaleOptions scale_options = options.scale_options;
             scale_options.temporary_directory = temporary;
             scale_options.sort_memory_bytes = options.memory_bytes;
+            scale_options.raw_vc = &raw_vc;
+            if (options.warm_start && !previous_scale.empty()) {
+                scale_options.warm_norm = &previous_scale;
+                scale_options.warm_resolution = previous_scale_resolution;
+                scale_options.warm_excluded_fraction = previous_excluded_fraction;
+            }
             ScaleResult scale = scale_cis(cells, bins, scale_options);
             if (scale.success) {
-                rescale_norm(cells, scale.values);
                 manifest.vectors.push_back(write_norm(scale_id, chr, ri, resolution,
                                                       scale.values, directory));
-                std::cerr << "  SCALE converged in " << scale.iterations << " iterations\n";
+                previous_scale = scale.values;
+                previous_scale_resolution = resolution;
+                previous_excluded_fraction = scale.excluded_fraction;
+                std::cerr << "  SCALE converged in " << scale.iterations << " iterations"
+                          << (scale.used_warm_start ? " with coarse warm start" : "")
+                          << "; excluded " << scale.excluded_fraction * 100 << "% of rows\n";
             } else {
                 scale_active = false;
                 std::cerr << "  SCALE failed: " << scale.reason
                           << "; skipping finer resolutions for this chromosome\n";
             }
         }
+        if (options.cache_rollups && build.root_only &&
+            resolution != build.resolutions.front()) {
+            atomic_rename(cells.path, cached_cell_path(
+                directory, stage.source_fingerprint, chr, resolution));
+        }
+        const auto resolution_end = std::chrono::steady_clock::now();
+        std::cerr << "  timing materialize="
+                  << std::chrono::duration<double>(materialized_at - resolution_begin).count()
+                  << "s coverage="
+                  << std::chrono::duration<double>(coverage_at - materialized_at).count()
+                  << "s VC="
+                  << std::chrono::duration<double>(simple_norms_at - coverage_at).count()
+                  << "s total="
+                  << std::chrono::duration<double>(resolution_end - resolution_begin).count()
+                  << "s\n";
     }
     write_vector_manifest(manifest, result_path);
 }
@@ -398,6 +456,7 @@ void expected_resolution(const std::string &stage_path, const std::string &build
         std::cerr << "Expected-value task " << ri << " already complete\n";
         return;
     }
+    const auto expected_begin = std::chrono::steady_clock::now();
     std::map<std::tuple<uint32_t, uint32_t>, VectorInfo> norms;
     for (uint32_t chr = 0; chr < stage.chromosomes.size(); ++chr) {
         const std::string path = chromosome_manifest_path(directory, chr);
@@ -425,31 +484,64 @@ void expected_resolution(const std::string &stage_path, const std::string &build
     expected.reserve(manifest.norms.size());
     for (size_t norm = 0; norm < manifest.norms.size(); ++norm)
         expected.emplace_back(new NormalizedExpected(maximum_bins));
+    std::vector<std::string> consumed_cache;
     for (uint32_t chr = 0; chr < stage.chromosomes.size(); ++chr) {
         if (!has_pair_cells(build, chr, chr)) continue;
-        CellMaterialization materialized = materialize_cell(
-            build, chr, chr, resolution, temporary,
-            "expected-c" + std::to_string(chr) + "-r" +
-                std::to_string(resolution));
-        const RunInfo &cells = materialized.run();
+        CellMaterialization materialized;
+        RunInfo cached;
+        const std::string cache = cached_cell_path(
+            directory, stage.source_fingerprint, chr, resolution);
+        const RunInfo *cells_pointer = nullptr;
+        if (path_exists(cache)) {
+            cached = inspect_run(cache, false);
+            require(cached.chr1 == chr && cached.chr2 == chr &&
+                        cached.resolution == resolution,
+                    "cached normalization rollup metadata mismatch: " + cache);
+            cells_pointer = &cached;
+            consumed_cache.push_back(cache);
+        } else {
+            materialized = materialize_cell(
+                build, chr, chr, resolution, temporary,
+                "expected-c" + std::to_string(chr) + "-r" +
+                    std::to_string(resolution));
+            cells_pointer = &materialized.run();
+        }
+        const RunInfo &cells = *cells_pointer;
         const uint32_t bins = chromosome_bins(stage.chromosomes[chr].length, resolution);
-        raw.add(chr, cells, bins);
+        std::vector<std::vector<float>> values(manifest.norms.size());
+        std::vector<uint8_t> available(manifest.norms.size());
         for (uint32_t norm = 0; norm < manifest.norms.size(); ++norm) {
             auto vector_it = norms.find(std::make_tuple(norm, chr));
             if (vector_it == norms.end()) continue;
             require(vector_it->second.words == bins, "normalization vector length mismatch");
             VectorFileReader input(vector_it->second);
             std::vector<uint32_t> words = input.read(0, bins);
-            std::vector<float> values(bins);
-            std::transform(words.begin(), words.end(), values.begin(), bits_float);
-            expected[norm]->add(chr, cells, bins, values);
+            values[norm].resize(bins);
+            std::transform(words.begin(), words.end(), values[norm].begin(), bits_float);
+            available[norm] = 1;
+            expected[norm]->begin(chr, bins);
         }
+        raw.begin(chr, bins);
+        RunReader reader(cells);
+        CellRecord cell;
+        while (reader.next(cell)) {
+            raw.add(cell);
+            for (uint32_t norm = 0; norm < manifest.norms.size(); ++norm)
+                if (available[norm]) expected[norm]->add(cell, values[norm]);
+        }
+        raw.end();
+        for (uint32_t norm = 0; norm < manifest.norms.size(); ++norm)
+            if (available[norm]) expected[norm]->end();
     }
     if (raw.has_data()) manifest.vectors.push_back(raw.finish(ri, resolution, directory));
     for (uint32_t norm = 0; norm < manifest.norms.size(); ++norm)
         if (expected[norm]->has_data())
             manifest.vectors.push_back(expected[norm]->finish(norm, ri, resolution, directory));
     write_vector_manifest(manifest, result_path);
+    for (const std::string &path : consumed_cache) std::remove(path.c_str());
+    std::cerr << "Expected values at " << resolution << " bp completed in "
+              << std::chrono::duration<double>(std::chrono::steady_clock::now() - expected_begin).count()
+              << "s with one cell-stream pass per chromosome\n";
 }
 
 void finalize_vectors(const std::string &stage_path, const std::string &build_path,

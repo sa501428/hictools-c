@@ -209,7 +209,7 @@ def main():
             assert dict(merged_norm_hic.vectors[key][1]) == dict(hic.vectors[key][1])
 
         root_vectors = root / "root-vectors"
-        run([executable, "normalize", "--no-scale", "--memory", "1MiB",
+        run([executable, "normalize", "--no-scale", "--cache-rollups", "--memory", "1MiB",
              stage / "stage.manifest", root_build / "build.manifest", root_vectors])
         root_normalized = root / "root-normalized.hic"
         run([executable, "write", "--genome", "tiny", "--memory", "1MiB",
@@ -221,6 +221,7 @@ def main():
             close_words(root_norm_hic.vectors[key][0], hic.vectors[key][0])
             assert dict(root_norm_hic.vectors[key][1]) == dict(hic.vectors[key][1])
         assert not list(root_vectors.rglob("materialize-*.h10r"))
+        assert not list(root_vectors.rglob("*.h10r"))
 
         chromosome_sizes = root / "chrom.sizes"
         chromosome_sizes.write_text("chr1\t20\nchr2\t12\n")
@@ -256,6 +257,8 @@ def main():
                          "--memory", "1MiB", "-t", "2", "--iter", "500",
                          scale_stage / "stage.manifest", scale_build / "build.manifest",
                          scale_vectors])
+        assert "coarse warm start" in scale_run.stderr
+        assert "degree cutoffs percentile=" in scale_run.stderr
         scale_hic = root / "scale.hic"
         run([executable, "write", "--vectors", scale_vectors / "vectors.manifest",
              "--memory", "1MiB", scale_stage / "stage.manifest",

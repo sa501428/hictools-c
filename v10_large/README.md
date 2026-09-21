@@ -133,6 +133,15 @@ build/hic_v10_large normalize -t 16 --memory 16GiB \
   stage-dir/stage.manifest build-dir/build.manifest vectors-dir
 ```
 
+SCALE uses the last successful coarser-resolution vector as the starting point
+for the next finer resolution. The stored normalization divisor is lifted by
+genomic overlap (including non-integral transitions such as 500 bp to 200 bp),
+converted to balancing weights, and adjusted by the finer-resolution VC. Use
+`--no-warm-start` to retain the legacy independent `sqrt(VC)` starts, or
+`--warm-vc-exponent N` to change the coverage blend from its conservative
+default of `0.5`. A warm attempt that stalls automatically retries the legacy
+start before any rows are discarded.
+
 For a cluster:
 
 ```sh
@@ -165,6 +174,18 @@ SCALE fails its convergence and balanced-row-sum criteria at one resolution,
 that chromosome skips SCALE at all finer/smaller-bin resolutions. VC,
 VC_SQRT, and every other chromosome continue. The balancing policy mirrors the
 existing V10 SCALE cutoff, row-rescue, convergence-rate, and post-scaling logic.
+The cutoff ceiling is assessed from the complete nonzero-count distribution in
+two ways: its 20th percentile and `mean - 1 standard deviation`; the more
+permissive ceiling is retained. A successful coarse-resolution excluded-row
+fraction is also used as a hint after an all-row fine-resolution attempt stalls.
+Cutoffs that would produce an unchanged row mask are skipped, and rows with no
+remaining active neighbor are removed before another balancing attempt.
+
+With a `--root-only` build, `--cache-rollups` trades temporary disk space for
+speed by retaining each normalization rollup until the corresponding expected-
+value task consumes it. The default remains low-scratch behavior. Expected
+calculation reads each chromosome/resolution cell stream once and accumulates
+raw and all normalized expected vectors together.
 
 At hg38 chr1 1 bp, normalization vectors have roughly 249 million entries.
 SCALE's peak heap is approximately 120 bytes per bin plus mapped CSR pages and

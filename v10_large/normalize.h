@@ -11,6 +11,8 @@ struct NormalizeOptions {
     bool scale = true;
     uint64_t memory_bytes = 8ULL * 1024 * 1024 * 1024;
     std::string temporary_directory;
+    bool warm_start = true;
+    bool cache_rollups = false;
     ScaleOptions scale_options;
 };
 

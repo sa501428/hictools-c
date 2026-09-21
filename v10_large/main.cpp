@@ -6,6 +6,7 @@
 #include "v10/reader.h"
 
 #include <climits>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -40,7 +41,8 @@ void usage() {
            "  hic_v10_large merge-pairs [--vectors vectors.manifest] [-t N] [--level N]\n"
            "      <stage.manifest> <build.manifest> <parts-dir> <output.hic>\n\n"
            "  hic_v10_large normalize [--memory SIZE] [--tmp DIR] [-t N] [--fan-in N]\n"
-           "      [--no-vc] [--no-vc-sqrt] [--no-scale]\n"
+           "      [--no-vc] [--no-vc-sqrt] [--no-scale] [--no-warm-start]\n"
+           "      [--cache-rollups] [--warm-vc-exponent N]\n"
            "      <stage.manifest> <build.manifest> <vectors-dir>\n\n"
            "  hic_v10_large plan-normalize [normalization options]\n"
            "      <stage.manifest> <build.manifest> <vectors-dir>\n"
@@ -260,11 +262,18 @@ int main(int argc, char **argv) {
                 else if (arg == "--no-vc") options.vc = false;
                 else if (arg == "--no-vc-sqrt") options.vc_sqrt = false;
                 else if (arg == "--no-scale") options.scale = false;
+                else if (arg == "--no-warm-start") options.warm_start = false;
+                else if (arg == "--cache-rollups") options.cache_rollups = true;
+                else if (arg == "--warm-vc-exponent")
+                    options.scale_options.warm_vc_exponent = std::stod(value());
                 else {
                     require(arg.empty() || arg[0] != '-', "unknown option " + arg);
                     args.push_back(arg);
                 }
             }
+            require(options.scale_options.warm_vc_exponent >= 0 &&
+                        std::isfinite(options.scale_options.warm_vc_exponent),
+                    "--warm-vc-exponent must be finite and nonnegative");
             size_t wanted = command == "normalize-chr" || command == "expected-res" ? 4 : 3;
             require(args.size() == wanted, command + " received the wrong number of arguments");
             if (command == "normalize") normalize_cells(args[0], args[1], args[2], options);
