@@ -3,9 +3,11 @@
 #include "stage.h"
 #include "writer.h"
 #include "normalize.h"
+#include "v10/reader.h"
 
 #include <climits>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -26,8 +28,13 @@ void usage() {
            "  hic_v10_large build-pair -r N,N,... [--root-only] [--memory SIZE] <stage.manifest> <build-dir> <pair-id>\n"
            "  hic_v10_large finalize-build -r N,N,... [--root-only] <stage.manifest> <build-dir>\n\n"
            "  hic_v10_large write [--genome NAME] [--memory SIZE] [--tmp DIR] [-t N]\n"
-           "      [--vectors vectors.manifest]\n"
+           "      [--vectors vectors.manifest] [--pair PAIR_ID] [--resolution-batch N]\n"
            "      [--derive TARGET:SOURCE] <stage.manifest> <build.manifest> <output.hic>\n\n"
+           "  hic_v10_large plan-write <stage.manifest> <build.manifest> <parts-dir> <output.hic>\n"
+           "  hic_v10_large write-pair [writer options] <stage.manifest> <build.manifest>\n"
+           "      <parts-dir> <pair-id>\n"
+           "  hic_v10_large merge-pairs [--vectors vectors.manifest] [-t N] [--level N]\n"
+           "      <stage.manifest> <build.manifest> <parts-dir> <output.hic>\n\n"
            "  hic_v10_large normalize [--memory SIZE] [--tmp DIR] [-t N]\n"
            "      [--no-vc] [--no-vc-sqrt] [--no-scale]\n"
            "      <stage.manifest> <build.manifest> <vectors-dir>\n\n"
@@ -39,6 +46,7 @@ void usage() {
            "      <stage.manifest> <build.manifest> <vectors-dir> <resolution-index>\n"
            "  hic_v10_large finalize-vectors [normalization options]\n"
            "      <stage.manifest> <build.manifest> <vectors-dir>\n\n"
+           "  hic_v10_large validate-v10 [--matrix CHR1:CHR2:BIN] <file.v10.hic>\n\n"
            "The large-data builder is separate from hic_v10 pre. Stage validates the\n"
            "entire gzip/HBS stream, checks chromosome-pair contiguity, and writes\n"
            "record-aligned shards plus a durable manifest.\n";
@@ -78,6 +86,20 @@ std::pair<uint32_t, uint32_t> derivation(const std::string &text) {
     uint64_t source = number(text.substr(colon + 1));
     require(target <= UINT32_MAX && source <= UINT32_MAX, "derived resolution is too large");
     return {static_cast<uint32_t>(target), static_cast<uint32_t>(source)};
+}
+
+struct MatrixSample {
+    uint32_t chr1 = 0, chr2 = 0, bin = 0;
+};
+
+MatrixSample matrix_sample(const std::string &text) {
+    size_t first = text.find(':'), second = text.find(':', first + 1);
+    require(first != std::string::npos && second != std::string::npos &&
+                text.find(':', second + 1) == std::string::npos,
+            "--matrix requires CHR1:CHR2:BIN numeric IDs");
+    return {number32(text.substr(0, first), "matrix chromosome ID"),
+            number32(text.substr(first + 1, second - first - 1), "matrix chromosome ID"),
+            number32(text.substr(second + 1), "matrix bin size")};
 }
 } // namespace
 
@@ -155,7 +177,18 @@ int main(int argc, char **argv) {
             else if (command == "build-pair")
                 build_pair_cells(args[0], args[1], static_cast<size_t>(number(args[2])), options);
             else finalize_build(args[0], args[1], options);
-        } else if (command == "write") {
+        } else if (command == "plan-write") {
+            std::vector<std::string> args;
+            for (int i = 2; i < argc; ++i) {
+                std::string arg = argv[i];
+                require(arg.empty() || arg[0] != '-', "unknown option " + arg);
+                args.push_back(arg);
+            }
+            require(args.size() == 4,
+                    "plan-write needs stage.manifest, build.manifest, parts-dir, and output.hic");
+            print_write_tasks(args[0], args[1], args[2], args[3]);
+        } else if (command == "write" || command == "write-pair" ||
+                   command == "merge-pairs") {
             WriteOptions options;
             std::vector<std::string> args;
             for (int i = 2; i < argc; ++i) {
@@ -176,14 +209,33 @@ int main(int argc, char **argv) {
                     options.threads = static_cast<int>(threads);
                 }
                 else if (arg == "--fan-in") options.merge_fan_in = static_cast<size_t>(number(value()));
+                else if (arg == "--resolution-batch")
+                    options.resolution_batch = static_cast<size_t>(number(value()));
+                else if (arg == "--pair") options.pair_index = static_cast<size_t>(number(value()));
                 else if (arg == "--derive") options.derived.push_back(derivation(value()));
                 else {
                     require(arg.empty() || arg[0] != '-', "unknown option " + arg);
                     args.push_back(arg);
                 }
             }
-            require(args.size() == 3, "write needs stage.manifest, build.manifest, and output.hic");
-            write_v10(args[0], args[1], args[2], options);
+            if (command == "write") {
+                require(args.size() == 3,
+                        "write needs stage.manifest, build.manifest, and output.hic");
+                write_v10(args[0], args[1], args[2], options);
+            } else if (command == "write-pair") {
+                require(args.size() == 4,
+                        "write-pair needs stage.manifest, build.manifest, parts-dir, and pair-id");
+                require(options.pair_index == std::numeric_limits<size_t>::max(),
+                        "write-pair takes its pair ID as the final argument, not --pair");
+                write_pair_v10(args[0], args[1], args[2],
+                               static_cast<size_t>(number(args[3])), options);
+            } else {
+                require(args.size() == 4,
+                        "merge-pairs needs stage.manifest, build.manifest, parts-dir, and output.hic");
+                require(options.pair_index == std::numeric_limits<size_t>::max(),
+                        "--pair is not valid for merge-pairs");
+                merge_pair_v10(args[0], args[1], args[2], args[3], options);
+            }
         } else if (command == "normalize" || command == "plan-normalize" ||
                    command == "normalize-chr" || command == "expected-res" ||
                    command == "finalize-vectors") {
@@ -221,6 +273,48 @@ int main(int argc, char **argv) {
                 expected_resolution(args[0], args[1], args[2],
                                     number32(args[3], "resolution index"), options);
             else finalize_vectors(args[0], args[1], args[2], options);
+        } else if (command == "validate-v10") {
+            std::vector<MatrixSample> samples;
+            std::vector<std::string> args;
+            for (int i = 2; i < argc; ++i) {
+                std::string arg = argv[i];
+                if (arg == "--matrix") {
+                    require(i + 1 < argc, "missing value for --matrix");
+                    samples.push_back(matrix_sample(argv[++i]));
+                } else {
+                    require(arg.empty() || arg[0] != '-', "unknown option " + arg);
+                    args.push_back(arg);
+                }
+            }
+            require(args.size() == 1, "validate-v10 needs one V10 file");
+            hic10::Reader reader(args[0]);
+            auto relocation_fields = reader.matrix_relocation_fields();
+            const auto &header = reader.header();
+            std::cout << "file\t" << args[0] << "\n"
+                      << "bytes\t" << reader.file_size() << "\n"
+                      << "genome\t" << header.genome << "\n"
+                      << "chromosomes\t" << header.chromosomes.size() << "\n"
+                      << "matrices\t" << reader.matrices().size() << "\n"
+                      << "bp_resolutions\t" << header.resolutions[0].size() << "\n"
+                      << "relocation_fields\t" << relocation_fields.size() << "\n";
+            for (const MatrixSample &sample : samples) {
+                require(sample.chr1 <= sample.chr2 &&
+                            sample.chr2 < header.chromosomes.size(),
+                        "sample matrix chromosome ID is outside header");
+                uint32_t ri = header.resolution(0, sample.bin);
+                hic10::Matrix matrix = reader.matrix(sample.chr1, sample.chr2, 0, ri);
+                require(!matrix.scores, "sample matrix unexpectedly contains scores");
+                uint64_t checksum = 14695981039346656037ULL, sum = 0;
+                for (const auto &cell : matrix.cells) {
+                    require(cell.value <= UINT64_MAX - sum, "sample matrix sum overflow");
+                    sum += cell.value;
+                    CellRecord record{cell.x, cell.y, cell.value};
+                    checksum = fnv1a(&record, sizeof(record), checksum);
+                }
+                std::cout << "matrix\t" << sample.chr1 << '\t' << sample.chr2 << '\t'
+                          << sample.bin << '\t' << matrix.cells.size() << '\t' << sum
+                          << '\t' << hex64(checksum) << "\n";
+            }
         } else {
             fail("unknown command " + command);
         }

@@ -28,6 +28,7 @@ class Reader {
 
     const Header &header() const { return header_; }
     const std::vector<MatrixKey> &matrices() const { return matrix_keys_; }
+    FileLocator matrix_location(MatrixKey key) const;
     uint64_t header_length() const { return header_length_; }
     uint64_t file_size() const { return file_size_; }
     const std::array<FileLocator, 3> &vector_indexes() const { return vector_indexes_; }

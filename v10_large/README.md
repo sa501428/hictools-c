@@ -102,11 +102,14 @@ merge. Published task manifests make all commands idempotent. A completed pair
 reclaims its map and reduction runs only after its durable pair manifest exists.
 
 `--root-only` is the recommended low-scratch mode. It retains only the canonical
-finest-resolution stream for each pair. Normalization and assembly materialize
-one requested coarser stream from that root, consume it, verify it, and remove
-it. Peak retained cell storage is therefore about 16 bytes per occupied finest
-cell instead of up to 16 bytes per occupied cell per resolution. The tradeoff is
-one sequential root-cell pass per requested coarser resolution in each consumer.
+finest-resolution stream for each pair. Normalization materializes one requested
+coarser stream from that root, consumes it, verifies it, and removes it. The
+writer rolls up a bounded batch of resolutions during each root-stream pass and
+feeds them directly to block builders without writing intermediate cell files.
+Peak retained cell storage is therefore about 16 bytes per occupied finest cell
+instead of up to 16 bytes per occupied cell per resolution. The tradeoff is a
+small number of sequential root-cell passes in the writer and one pass per
+requested coarser resolution in normalization.
 
 Omit `--root-only` on every build command to select the faster, high-scratch
 mode. In that mode coarser resolutions never rescan HBS: the nearest completed
@@ -173,27 +176,63 @@ sidecars live on sufficiently fast local or parallel storage.
 
 ```sh
 build/hic_v10_large write --genome hg38 --memory 16GiB -t 16 \
+  --resolution-batch 4 \
   --tmp /fast/scratch/block-work \
   --vectors vectors-dir/vectors.manifest \
   stage-dir/stage.manifest build-dir/build.manifest output.hic
 ```
 
+For a cluster, make matrix assembly a second map/reduce phase:
+
+```sh
+build/hic_v10_large plan-write \
+  stage-dir/stage.manifest build-dir/build.manifest pair-parts output.hic
+
+# Run one array job for every write-pair row printed by plan-write.
+build/hic_v10_large write-pair --genome hg38 --memory 16GiB -t 16 \
+  --resolution-batch 4 --tmp /fast/scratch/block-work \
+  stage-dir/stage.manifest build-dir/build.manifest pair-parts PAIR_ID
+
+# Run once after every pair job succeeds. Vectors are written only here.
+build/hic_v10_large merge-pairs -t 16 \
+  --vectors vectors-dir/vectors.manifest \
+  stage-dir/stage.manifest build-dir/build.manifest pair-parts output.hic
+```
+
+Pair tasks are transactional and idempotent. Each produces a standalone,
+independently valid V10 file with exactly one matrix. `merge-pairs` verifies the
+source geometry, exact fragment header, expected pair identity, footer, block
+indexes, and relocation fields. It then copies already-compressed matrix bytes
+in 8 MiB windows and relocates absolute offsets in flight. Cell blocks are not
+decoded or recompressed, so merge memory is bounded and its work is essentially
+one sequential read plus one sequential write of the final matrix section.
+Fragments must be on storage visible to the merge job. Do not pass `--vectors`
+to `write-pair`; the final merge writes each normalization array only once.
+
 Assembly is transactional: it writes beside the destination, flushes and
 `fsync`s it, then renames it. Matrix cells are externally sorted by V10 logical
-block number. Block-run inputs are reclaimed after successful merges, and the
-potentially very large H10I block index is streamed through a sidecar instead
-of being held twice in memory. Zstandard compression uses a bounded, ordered
-worker queue with at most `-t` logical blocks in flight. Normalization arrays
-are chunked into independent H10V frames.
+block number. In root-only mode, `--resolution-batch` controls how many
+materialized resolutions share one scan of the root stream; their block-builder
+memory budgets divide `--memory`. Block-run inputs are reclaimed after
+successful merges, and the potentially very large H10I block index is streamed
+through a sidecar instead of being held twice in memory. Zstandard compression
+uses a bounded, ordered worker queue with at most `-t` logical blocks in flight.
+Normalization arrays are chunked into independent H10V frames.
 
-The writer follows V10's required adaptive block geometry. It does not retain
-an adaptive logical block in RAM: workers identify a fixed-record span, scan it
-to obtain bounds and encoding sizes, and stream positions and values through
-Zstandard into a temporary encoded-block sidecar. Peak encoding memory is thus
-independent of the block's occupied-cell count. A block whose raw or compressed
-payload exceeds V10's own `u32` length fields fails explicitly. Mandatory V10
-derived-resolution declarations are applied, while the independently rolled-up
-cells remain available for norms and expected vectors.
+The writer follows V10's required adaptive block geometry. Ordinary logical
+blocks with at most 8 MiB of fixed-width input records are cached, encoded, and
+compressed directly into their final in-memory bytes, eliminating per-block
+temporary-file traffic. Larger blocks use the bounded streaming encoder and a
+temporary encoded-block sidecar, so an unusually dense block cannot exhaust
+RAM. The cache/raw/compressed buffers are bounded per compression worker. A
+block whose raw or compressed payload exceeds V10's own `u32` length fields
+fails explicitly. Mandatory V10 derived-resolution declarations are applied,
+while the independently rolled-up cells remain available for norms and expected
+vectors.
+
+Use `hic_v10_large validate-v10 output.hic` for a streaming structural check.
+Add `--matrix CHR1_ID:CHR2_ID:BIN` one or more times to fully decode selected
+matrices and report their occupied-cell count, exact count sum, and checksum.
 
 ## Restart and storage behavior
 

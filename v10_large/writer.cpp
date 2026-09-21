@@ -7,6 +7,7 @@
 #include "sort.h"
 #include "vectors.h"
 #include "v10/format.h"
+#include "v10/reader.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -203,38 +204,89 @@ uint32_t choose_block_bins(uint64_t column_bins, uint64_t row_bins, uint32_t res
     return result;
 }
 
-std::vector<BlockRun> create_block_runs(const RunInfo &cells, const std::string &directory,
-                                        uint64_t memory_bytes, uint32_t block_bins,
-                                        uint32_t columns, bool rotated) {
-    uint64_t capacity = memory_bytes / (2 * sizeof(BlockCell));
-    require(capacity >= 1024, "writer sort memory is too small");
-    capacity = std::min<uint64_t>(capacity, std::numeric_limits<size_t>::max());
-    std::vector<BlockCell> chunk;
-    chunk.reserve(static_cast<size_t>(capacity));
+class MatrixStatistics {
+  public:
+    MatrixStatistics(uint64_t columns, uint64_t rows, bool cis)
+        : columns_(columns), rows_(rows), cis_(cis) {}
+    void add(const CellRecord &cell) {
+        require(cell.x < columns_ && cell.y < rows_ && (!cis_ || cell.x <= cell.y),
+                "cell outside V10 matrix geometry");
+        require(cell.count <= UINT64_MAX - sum_, "matrix count sum exceeds uint64");
+        sum_ += cell.count;
+        require(occupied_ < UINT64_MAX, "matrix occupancy exceeds uint64");
+        ++occupied_;
+    }
+    std::pair<uint64_t, uint64_t> result() const { return {occupied_, sum_}; }
+  private:
+    uint64_t columns_ = 0, rows_ = 0, occupied_ = 0, sum_ = 0;
+    bool cis_ = false;
+};
+
+struct BlockBuild {
     std::vector<BlockRun> runs;
-    auto emit = [&]() {
-        if (chunk.empty()) return;
-        radix_sort_blocks(chunk);
+    std::pair<uint64_t, uint64_t> statistics;
+};
+
+class BlockRunBuilder {
+  public:
+    BlockRunBuilder(RunInfo metadata, std::string directory, uint64_t memory_bytes,
+                    uint32_t block_bins, uint32_t block_columns,
+                    uint64_t coordinate_columns, uint64_t coordinate_rows, bool rotated)
+        : metadata_(std::move(metadata)), directory_(std::move(directory)),
+          block_bins_(block_bins), block_columns_(block_columns), rotated_(rotated),
+          statistics_(coordinate_columns, coordinate_rows, rotated) {
+        uint64_t capacity = memory_bytes / (2 * sizeof(BlockCell));
+        require(capacity >= 1024, "writer sort memory is too small");
+        capacity = std::min<uint64_t>(capacity, std::numeric_limits<size_t>::max());
+        chunk_.reserve(static_cast<size_t>(capacity));
+    }
+    void add(const CellRecord &cell) {
+        statistics_.add(cell);
+        uint32_t number = rotated_
+            ? hic10::rotated_block_number(cell.x, cell.y, block_bins_, block_columns_)
+            : hic10::narrow(uint64_t(cell.y / block_bins_) * block_columns_ +
+                            cell.x / block_bins_);
+        chunk_.push_back({number, cell.x, cell.y, 0, cell.count});
+        if (chunk_.size() == chunk_.capacity()) emit();
+    }
+    BlockBuild finish() {
+        emit();
+        return {std::move(runs_), statistics_.result()};
+    }
+  private:
+    void emit() {
+        if (chunk_.empty()) return;
+        radix_sort_blocks(chunk_);
         std::ostringstream name;
-        name << "block-" << cells.chr1 << '-' << cells.chr2 << '-' << cells.resolution
-             << '-' << runs.size() << ".h10q";
-        BlockRunWriter writer(join_path(directory, name.str()), cells.chr1, cells.chr2,
-                              cells.resolution);
-        for (const auto &cell : chunk) writer.add(cell);
-        runs.push_back(writer.finish());
-        chunk.clear();
-    };
+        name << "block-" << metadata_.chr1 << '-' << metadata_.chr2 << '-'
+             << metadata_.resolution << '-' << runs_.size() << ".h10q";
+        BlockRunWriter writer(join_path(directory_, name.str()), metadata_.chr1,
+                              metadata_.chr2, metadata_.resolution);
+        for (const auto &cell : chunk_) writer.add(cell);
+        runs_.push_back(writer.finish());
+        chunk_.clear();
+    }
+    RunInfo metadata_;
+    std::string directory_;
+    uint32_t block_bins_ = 0, block_columns_ = 0;
+    bool rotated_ = false;
+    MatrixStatistics statistics_;
+    std::vector<BlockCell> chunk_;
+    std::vector<BlockRun> runs_;
+};
+
+BlockBuild create_block_runs(const RunInfo &cells, const std::string &directory,
+                             uint64_t memory_bytes, uint32_t block_bins,
+                             uint32_t block_columns, uint64_t coordinate_columns,
+                             uint64_t coordinate_rows, bool rotated) {
+    BlockRunBuilder builder(cells, directory, memory_bytes, block_bins, block_columns,
+                            coordinate_columns, coordinate_rows, rotated);
     RunReader input(cells);
     CellRecord cell;
-    while (input.next(cell)) {
-        uint32_t number = rotated
-            ? hic10::rotated_block_number(cell.x, cell.y, block_bins, columns)
-            : hic10::narrow(uint64_t(cell.y / block_bins) * columns + cell.x / block_bins);
-        chunk.push_back({number, cell.x, cell.y, 0, cell.count});
-        if (chunk.size() == chunk.capacity()) emit();
-    }
-    emit();
-    return runs;
+    while (input.next(cell)) builder.add(cell);
+    BlockBuild result = builder.finish();
+    require(result.statistics.first == cells.records, "cell run record count changed");
+    return result;
 }
 
 BlockRun merge_block_group(const std::vector<BlockRun> &runs, const std::string &path) {
@@ -272,6 +324,7 @@ BlockRun merge_block_group(const std::vector<BlockRun> &runs, const std::string 
 BlockRun bounded_block_merge(std::vector<BlockRun> runs, const std::string &directory,
                              size_t fan_in) {
     require(!runs.empty() && fan_in >= 2, "invalid block merge");
+    if (runs.size() == 1) return std::move(runs.front());
     uint64_t pass = 0;
     while (runs.size() > fan_in) {
         std::vector<BlockRun> next;
@@ -408,19 +461,24 @@ struct EncodedBlockFile {
     uint32_t number = 0;
     uint64_t bytes = 0;
     std::string path;
+    Bytes data;
     EncodedBlockFile() = default;
     EncodedBlockFile(uint32_t n, uint64_t b, std::string p)
         : number(n), bytes(b), path(std::move(p)) {}
+    EncodedBlockFile(uint32_t n, Bytes b)
+        : number(n), bytes(b.size()), data(std::move(b)) {}
     EncodedBlockFile(const EncodedBlockFile &) = delete;
     EncodedBlockFile &operator=(const EncodedBlockFile &) = delete;
     EncodedBlockFile(EncodedBlockFile &&other) noexcept
-        : number(other.number), bytes(other.bytes), path(std::move(other.path)) {
+        : number(other.number), bytes(other.bytes), path(std::move(other.path)),
+          data(std::move(other.data)) {
         other.path.clear();
     }
     EncodedBlockFile &operator=(EncodedBlockFile &&other) noexcept {
         if (this != &other) {
             if (!path.empty()) std::remove(path.c_str());
             number = other.number; bytes = other.bytes; path = std::move(other.path);
+            data = std::move(other.data);
             other.path.clear();
         }
         return *this;
@@ -430,10 +488,27 @@ struct EncodedBlockFile {
 
 EncodedBlockFile encode_block_span(const BlockRun &run, const BlockSpan &span,
                                    int level) {
+    // Most logical blocks are small. Reading each one once and reusing it for
+    // the sizing/representation/emission passes avoids millions of open/seek
+    // cycles on deep maps. Exceptionally large blocks retain the fully
+    // streaming path, so memory remains bounded independently of occupancy.
+    constexpr uint64_t CACHE_BYTES = 8ULL * 1024 * 1024;
+    std::vector<BlockCell> cached;
+    if (span.records <= CACHE_BYTES / sizeof(BlockCell)) {
+        cached.reserve(static_cast<size_t>(span.records));
+        scan_block_span(run, span, [&](const BlockCell &cell) { cached.push_back(cell); });
+    }
+    auto scan = [&](auto callback) {
+        if (!cached.empty()) {
+            for (const BlockCell &cell : cached) callback(cell);
+        } else {
+            scan_block_span(run, span, callback);
+        }
+    };
     uint32_t xmin = UINT32_MAX, ymin = UINT32_MAX, xmax = 0, ymax = 0;
     uint64_t common = 0, direct_bytes = 0;
     bool first = true, all_same = true;
-    scan_block_span(run, span, [&](const BlockCell &cell) {
+    scan([&](const BlockCell &cell) {
         xmin = std::min(xmin, cell.x); ymin = std::min(ymin, cell.y);
         xmax = std::max(xmax, cell.x); ymax = std::max(ymax, cell.y);
         if (first) common = cell.count;
@@ -448,7 +523,7 @@ EncodedBlockFile encode_block_span(const BlockRun &run, const BlockSpan &span,
     const uint32_t height = hic10::narrow(uint64_t(ymax) - ymin + 1);
     const uint64_t area = uint64_t(width) * height;
     uint64_t sparse_bytes = 0, previous = 0, ordinal = 0;
-    scan_block_span(run, span, [&](const BlockCell &cell) {
+    scan([&](const BlockCell &cell) {
         uint64_t position = uint64_t(cell.y - ymin) * width + cell.x - xmin;
         require(!ordinal || position > previous, "unordered cell inside logical block");
         uint32_t bytes = varint_size(ordinal ? position - previous : position);
@@ -465,6 +540,55 @@ EncodedBlockFile encode_block_span(const BlockRun &run, const BlockSpan &span,
                 position_bytes + value_bytes <= UINT32_MAX - 40,
             "logical block payload exceeds the V10 uint32 size limit");
     const uint32_t raw_bytes = static_cast<uint32_t>(40 + position_bytes + value_bytes);
+    Bytes payload_header;
+    hic10::put(payload_header, 1, 1);
+    hic10::put(payload_header, bitmap ? 1 : 0, 1);
+    hic10::put(payload_header, all_same ? 0 : 2, 1);
+    hic10::put(payload_header, 0, 1); // COUNT_UINT
+    hic10::put(payload_header, bitmap ? 1 : 0, 1);
+    hic10::put(payload_header, 0, 3);
+    hic10::put(payload_header, xmin, 4); hic10::put(payload_header, ymin, 4);
+    hic10::put(payload_header, width, 4); hic10::put(payload_header, height, 4);
+    hic10::put(payload_header, span.records, 8);
+    hic10::put(payload_header, position_bytes, 4); hic10::put(payload_header, value_bytes, 4);
+    require(payload_header.size() == 40, "invalid streamed payload header");
+
+    if (!cached.empty()) {
+        Bytes raw = payload_header;
+        raw.reserve(raw_bytes);
+        if (bitmap) {
+            raw.resize(40 + static_cast<size_t>(bitmap_bytes), 0);
+            for (const BlockCell &cell : cached) {
+                uint64_t position = uint64_t(cell.y - ymin) * width + cell.x - xmin;
+                raw[40 + position / 8] |= static_cast<uint8_t>(1u << (position % 8));
+            }
+        } else {
+            uint64_t prior = 0;
+            for (size_t i = 0; i < cached.size(); ++i) {
+                uint64_t position = uint64_t(cached[i].y - ymin) * width +
+                                    cached[i].x - xmin;
+                hic10::var(raw, i ? position - prior : position);
+                prior = position;
+            }
+        }
+        if (all_same) hic10::var(raw, common);
+        else for (const BlockCell &cell : cached) hic10::var(raw, cell.count);
+        require(raw.size() == raw_bytes, "cached logical block size mismatch");
+        const size_t bound = ZSTD_compressBound(raw.size());
+        Bytes stored(16 + bound);
+        std::memcpy(stored.data(), "H10B", 4);
+        stored[4] = 1; stored[5] = 1;
+        put_u32(stored.data() + 8, raw_bytes);
+        put_u32(stored.data() + 12, span.number);
+        size_t compressed = ZSTD_compress(stored.data() + 16, bound,
+                                          raw.data(), raw.size(), level);
+        require(!ZSTD_isError(compressed), "Zstandard block compression failed");
+        stored.resize(16 + compressed);
+        require(stored.size() <= UINT32_MAX,
+                "compressed logical block exceeds V10 uint32 size limit");
+        return EncodedBlockFile(span.number, std::move(stored));
+    }
+
     std::string path = run.path + ".encoded-" + std::to_string(span.number) + "-" +
                        std::to_string(getpid());
     RemovePath cleanup(path);
@@ -478,23 +602,11 @@ EncodedBlockFile encode_block_span(const BlockRun &run, const BlockSpan &span,
     {
         StreamingZstd compressor(output, level);
         RawEmitter raw(compressor);
-        Bytes payload_header;
-        hic10::put(payload_header, 1, 1);
-        hic10::put(payload_header, bitmap ? 1 : 0, 1);
-        hic10::put(payload_header, all_same ? 0 : 2, 1);
-        hic10::put(payload_header, 0, 1); // COUNT_UINT
-        hic10::put(payload_header, bitmap ? 1 : 0, 1);
-        hic10::put(payload_header, 0, 3);
-        hic10::put(payload_header, xmin, 4); hic10::put(payload_header, ymin, 4);
-        hic10::put(payload_header, width, 4); hic10::put(payload_header, height, 4);
-        hic10::put(payload_header, span.records, 8);
-        hic10::put(payload_header, position_bytes, 4); hic10::put(payload_header, value_bytes, 4);
-        require(payload_header.size() == 40, "invalid streamed payload header");
         raw.bytes(payload_header.data(), payload_header.size());
         if (bitmap) {
             uint64_t byte_index = 0;
             uint8_t word = 0;
-            scan_block_span(run, span, [&](const BlockCell &cell) {
+            scan([&](const BlockCell &cell) {
                 uint64_t position = uint64_t(cell.y - ymin) * width + cell.x - xmin;
                 uint64_t target = position / 8;
                 while (byte_index < target) { raw.byte(word); word = 0; ++byte_index; }
@@ -503,7 +615,7 @@ EncodedBlockFile encode_block_span(const BlockRun &run, const BlockSpan &span,
             while (byte_index < bitmap_bytes) { raw.byte(word); word = 0; ++byte_index; }
         } else {
             uint64_t prior = 0, index = 0;
-            scan_block_span(run, span, [&](const BlockCell &cell) {
+            scan([&](const BlockCell &cell) {
                 uint64_t position = uint64_t(cell.y - ymin) * width + cell.x - xmin;
                 raw.var(index ? position - prior : position);
                 prior = position;
@@ -513,7 +625,7 @@ EncodedBlockFile encode_block_span(const BlockRun &run, const BlockSpan &span,
         if (all_same) {
             raw.var(common);
         } else {
-            scan_block_span(run, span, [&](const BlockCell &cell) { raw.var(cell.count); });
+            scan([&](const BlockCell &cell) { raw.var(cell.count); });
         }
         raw.flush();
         compressor.finish();
@@ -695,7 +807,7 @@ class Output {
     bool published_ = false;
 };
 
-Bytes make_header(hic10::Header &header) {
+Bytes make_header(const hic10::Header &header) {
     Bytes b;
     hic10::magic(b, "HIC\0"); hic10::put(b, 10, 4); b.resize(88, 0);
     hic10::str(b, header.genome);
@@ -716,199 +828,224 @@ Bytes make_header(hic10::Header &header) {
     return b;
 }
 
-std::pair<uint64_t, uint64_t> run_statistics(const RunInfo &run,
-                                             uint64_t columns, uint64_t rows,
-                                             bool cis) {
-    RunReader reader(run);
-    CellRecord cell;
-    uint64_t occupied = 0, sum = 0;
-    while (reader.next(cell)) {
-        require(cell.x < columns && cell.y < rows && (!cis || cell.x <= cell.y),
-                "cell outside V10 matrix geometry");
-        require(cell.count <= UINT64_MAX - sum, "matrix count sum exceeds uint64");
-        sum += cell.count;
-        ++occupied;
-    }
-    require(occupied == run.records, "cell run record count changed");
-    return {occupied, sum};
-}
-
-} // namespace
-
-void write_v10(const std::string &stage_path, const std::string &build_path,
-               const std::string &output_path, const WriteOptions &options) {
-    StageManifest stage = read_stage_manifest(stage_path);
-    BuildManifest build = read_build_manifest(build_path);
-    require(build.source_fingerprint == stage.source_fingerprint,
-            "stage and build manifests refer to different sources");
-    require(options.memory_bytes >= 1024 * 1024, "writer memory budget is too small");
-    require(options.block_bins && options.block_bins <= 4096, "invalid block bin minimum");
-    require(options.threads > 0, "writer thread count must be positive");
-    require(options.compression_level >= ZSTD_minCLevel() &&
-                options.compression_level <= ZSTD_maxCLevel(), "invalid Zstandard level");
-    std::string temporary_directory = options.temporary_directory.empty()
-        ? join_path(build_path.substr(0, build_path.find_last_of('/')), "block-work")
-        : options.temporary_directory;
-    if (temporary_directory == "block-work") temporary_directory = "./block-work";
-    make_directory(temporary_directory);
-
+struct WriterState {
     hic10::Header header;
+    VectorManifest vectors;
+};
+
+WriterState prepare_writer_state(const StageManifest &stage, const BuildManifest &build,
+                                 const WriteOptions &options) {
+    WriterState state;
+    auto &header = state.header;
     header.genome = options.genome;
-    header.attributes = {{"software", "hictools-c hic_v10_large"}, {"hicFileScaling", "1.0"}};
+    header.attributes = {{"software", "hictools-c hic_v10_large"},
+                         {"hicFileScaling", "1.0"}};
     for (const auto &chromosome : stage.chromosomes)
         header.chromosomes.push_back({chromosome.name, chromosome.length, {}});
-    for (uint32_t resolution : build.resolutions) header.resolutions[0].push_back({resolution});
-    VectorManifest vectors;
+    for (uint32_t resolution : build.resolutions)
+        header.resolutions[0].push_back({resolution});
     if (!options.vector_manifest.empty()) {
-        vectors = read_vector_manifest(options.vector_manifest);
-        require(vectors.source_fingerprint == stage.source_fingerprint,
+        state.vectors = read_vector_manifest(options.vector_manifest);
+        require(state.vectors.source_fingerprint == stage.source_fingerprint,
                 "vector manifest refers to a different source");
-        header.norms = vectors.norms;
+        header.norms = state.vectors.norms;
     }
     auto derive = [&](uint32_t target_bin, uint32_t source_bin) {
-        uint32_t target = header.resolution(0, target_bin), source = header.resolution(0, source_bin);
+        uint32_t target = header.resolution(0, target_bin);
+        uint32_t source = header.resolution(0, source_bin);
         require(target_bin > source_bin && target_bin % source_bin == 0,
                 "derived target must be an integer multiple of source");
         require(!hic10::required_materialized_resolution(target_bin),
                 "500 kb must remain materialized");
-        auto &r = header.resolutions[0][target];
-        require(!r.mode || r.source == source, "conflicting derived source");
-        r.mode = 1; r.source = source; r.aggregation = 1;
+        auto &resolution = header.resolutions[0][target];
+        require(!resolution.mode || resolution.source == source,
+                "conflicting derived source");
+        resolution.mode = 1;
+        resolution.source = source;
+        resolution.aggregation = 1;
     };
     for (const auto &d : options.derived) derive(d.first, d.second);
-    for (const auto &r : header.resolutions[0])
-        if (uint32_t source = hic10::required_derived_source(r.bin)) derive(r.bin, source);
-    for (const auto &r : header.resolutions[0])
-        if (r.mode) require(!header.resolutions[0][r.source].mode, "chained derivation is forbidden");
+    for (const auto &resolution : header.resolutions[0])
+        if (uint32_t source = hic10::required_derived_source(resolution.bin))
+            derive(resolution.bin, source);
+    for (const auto &resolution : header.resolutions[0])
+        if (resolution.mode)
+            require(!header.resolutions[0][resolution.source].mode,
+                    "chained derivation is forbidden");
     require(hic10::required_bp_resolution_policy(header.resolutions[0]),
             "mandatory V10 resolution policy is not satisfied");
+    return state;
+}
 
-    Output output(output_path, make_header(header));
-    std::unique_ptr<ThreadPool> compression_pool(
-        options.threads > 1 ? new ThreadPool(static_cast<size_t>(options.threads)) : nullptr);
-    std::vector<MatrixEntry> matrices;
-    for (const PairInfo &pair : stage.pairs) {
-        uint32_t a = pair.chr1, b = pair.chr2;
-        const uint32_t n = hic10::narrow(header.resolutions[0].size());
-        Bytes meta;
-        hic10::magic(meta, "H10M"); hic10::put(meta, 1, 4);
-        hic10::put(meta, a, 4); hic10::put(meta, b, 4); hic10::put(meta, n, 4); hic10::put(meta, 0, 4);
-        meta.resize(24 + uint64_t(n) * 76, 0);
-        uint64_t meta_position = output.write(meta);
-        matrices.push_back({a, b, meta_position, meta.size()});
-        std::cerr << "Writing V10 matrix " << stage.chromosomes[a].name << " x "
-                  << stage.chromosomes[b].name << "\n";
-        for (uint32_t ri = 0; ri < header.resolutions[0].size(); ++ri) {
-            const auto &resolution = header.resolutions[0][ri];
-            std::ostringstream materialized_prefix;
-            materialized_prefix << "materialize-p" << a << '-' << b << "-r"
-                                << resolution.bin << '-' << getpid();
-            CellMaterialization materialized = materialize_cell(
-                build, a, b, resolution.bin, temporary_directory,
-                materialized_prefix.str());
-            const RunInfo &cells = materialized.run();
-            uint64_t column_bins = header.bins(a, 0, ri), row_bins = header.bins(b, 0, ri);
-            bool rotated = a == b;
-            auto statistics = run_statistics(cells, column_bins, row_bins, rotated);
-            uint32_t block_bins = choose_block_bins(column_bins, row_bins, resolution.bin,
-                                                    options.block_bins, rotated);
-            uint32_t columns = hic10::narrow(hic10::ceil_div(column_bins, block_bins));
-            uint32_t index_count = 0;
-            uint64_t index_position = 0, index_length = 0;
-            if (!resolution.mode && cells.records) {
-                auto runs = create_block_runs(cells, temporary_directory, options.memory_bytes,
-                                              block_bins, columns, rotated);
-                BlockRun blocks = bounded_block_merge(std::move(runs), temporary_directory,
-                                                      options.merge_fan_in);
-                RemovePath remove_blocks(blocks.path);
-                const std::string index_path = blocks.path + ".index-tmp-" +
-                                               std::to_string(getpid());
-                RemovePath remove_index(index_path);
-                {
-                    File index_file(index_path, "w+b");
-                    {
-                        BlockRunReader reader(blocks);
-                        BlockCell cell;
-                        std::deque<std::future<EncodedBlockFile>> pending;
-                        BlockSpan span;
-                        uint64_t record_index = 0;
-                        auto store = [&](EncodedBlockFile encoded) {
-                            uint64_t position = output.copy(encoded.path, encoded.bytes);
-                            require(index_count < UINT32_MAX,
-                                    "too many V10 blocks in one resolution");
-                            ++index_count;
-                            std::array<unsigned char, 16> entry{};
-                            put_u32(entry.data(), encoded.number);
-                            put_u32(entry.data() + 4, hic10::narrow(encoded.bytes));
-                            put_u64(entry.data() + 8, position);
-                            index_file.write(entry.data(), entry.size());
-                        };
-                        auto consume = [&]() {
-                            store(pending.front().get());
-                            pending.pop_front();
-                        };
-                        auto submit = [&]() {
-                            if (!span.records) return;
-                            if (compression_pool) {
-                                const int level = options.compression_level;
-                                pending.push_back(compression_pool->submit(
-                                    [level](BlockRun source, BlockSpan block) {
-                                        return encode_block_span(source, block, level);
-                                    }, blocks, span));
-                                if (pending.size() >= static_cast<size_t>(options.threads))
-                                    consume();
-                            } else {
-                                store(encode_block_span(blocks, span,
-                                                        options.compression_level));
-                            }
-                        };
-                        while (reader.next(cell)) {
-                            if (!span.records || cell.block != span.number) {
-                                submit();
-                                span = {cell.block, record_index, 0};
-                            }
-                            ++span.records;
-                            ++record_index;
-                        }
-                        submit();
-                        while (!pending.empty()) consume();
-                    }
-                    index_file.flush();
-                    index_file.seek(0);
-                    Bytes header;
-                    hic10::magic(header, "H10I"); hic10::put(header, 2, 4);
-                    index_length = uint64_t(24) + uint64_t(index_count) * 16;
-                    hic10::put(header, index_length, 8);
-                    hic10::put(header, index_count, 4); hic10::put(header, 0, 4);
-                    index_position = output.write(header);
-                    std::vector<unsigned char> copy(8 * 1024 * 1024);
-                    uint64_t remaining = uint64_t(index_count) * 16;
-                    while (remaining) {
-                        size_t n = static_cast<size_t>(std::min<uint64_t>(copy.size(), remaining));
-                        index_file.read(copy.data(), n);
-                        output.write(copy.data(), n);
-                        remaining -= n;
-                    }
-                    index_file.close();
-                }
+std::pair<uint64_t, uint64_t> run_statistics(const RunInfo &run,
+                                             uint64_t columns, uint64_t rows,
+                                             bool cis) {
+    MatrixStatistics statistics(columns, rows, cis);
+    RunReader reader(run);
+    CellRecord cell;
+    while (reader.next(cell)) statistics.add(cell);
+    auto result = statistics.result();
+    require(result.first == run.records, "cell run record count changed");
+    return result;
+}
+
+struct WrittenBlocks {
+    uint32_t count = 0;
+    uint64_t position = 0, length = 0;
+};
+
+WrittenBlocks write_block_build(Output &output, BlockBuild build,
+                                const std::string &temporary_directory,
+                                const WriteOptions &options, ThreadPool *compression_pool) {
+    WrittenBlocks result;
+    if (!build.statistics.first) return result;
+    BlockRun blocks = bounded_block_merge(std::move(build.runs), temporary_directory,
+                                          options.merge_fan_in);
+    RemovePath remove_blocks(blocks.path);
+    const std::string index_path = blocks.path + ".index-tmp-" +
+                                   std::to_string(getpid());
+    RemovePath remove_index(index_path);
+    File index_file(index_path, "w+b");
+    {
+        BlockRunReader reader(blocks);
+        BlockCell cell;
+        std::deque<std::future<EncodedBlockFile>> pending;
+        BlockSpan span;
+        uint64_t record_index = 0;
+        auto store = [&](EncodedBlockFile encoded) {
+            uint64_t position = encoded.data.empty()
+                ? output.copy(encoded.path, encoded.bytes)
+                : output.write(encoded.data);
+            require(result.count < UINT32_MAX, "too many V10 blocks in one resolution");
+            ++result.count;
+            std::array<unsigned char, 16> entry{};
+            put_u32(entry.data(), encoded.number);
+            put_u32(entry.data() + 4, hic10::narrow(encoded.bytes));
+            put_u64(entry.data() + 8, position);
+            index_file.write(entry.data(), entry.size());
+        };
+        auto consume = [&]() {
+            store(pending.front().get());
+            pending.pop_front();
+        };
+        auto submit = [&]() {
+            if (!span.records) return;
+            if (compression_pool) {
+                const int level = options.compression_level;
+                pending.push_back(compression_pool->submit(
+                    [level](BlockRun source, BlockSpan block) {
+                        return encode_block_span(source, block, level);
+                    }, blocks, span));
+                if (pending.size() >= static_cast<size_t>(options.threads)) consume();
+            } else {
+                store(encode_block_span(blocks, span, options.compression_level));
             }
-            Bytes descriptor;
-            hic10::put(descriptor, 0, 1); hic10::put(descriptor, resolution.mode, 1);
-            hic10::put(descriptor, resolution.aggregation, 1); hic10::put(descriptor, 0, 1);
-            hic10::put(descriptor, ri, 4); hic10::put(descriptor, resolution.bin, 4);
-            hic10::put(descriptor, resolution.source, 4); hic10::put(descriptor, rotated, 1);
-            hic10::put(descriptor, 0, 3); hic10::put(descriptor, statistics.second, 8);
-            hic10::put(descriptor, statistics.first, 8);
-            hic10::put(descriptor, 0x7fc00000, 4); hic10::put(descriptor, 0x7fc00000, 4);
-            hic10::put(descriptor, block_bins, 4); hic10::put(descriptor, columns, 4);
-            hic10::put(descriptor, index_position, 8); hic10::put(descriptor, index_length, 8);
-            hic10::put(descriptor, index_count, 4); hic10::put(descriptor, 0, 4);
-            output.patch(meta_position + 24 + uint64_t(ri) * 76, descriptor);
+        };
+        while (reader.next(cell)) {
+            if (!span.records || cell.block != span.number) {
+                submit();
+                span = {cell.block, record_index, 0};
+            }
+            ++span.records;
+            ++record_index;
         }
+        submit();
+        while (!pending.empty()) consume();
     }
-    if (!options.vector_manifest.empty())
-        write_vectors(output, header, vectors, options.compression_level,
-                      compression_pool.get(), options.threads);
+    index_file.flush();
+    index_file.seek(0);
+    Bytes header;
+    hic10::magic(header, "H10I"); hic10::put(header, 2, 4);
+    result.length = uint64_t(24) + uint64_t(result.count) * 16;
+    hic10::put(header, result.length, 8);
+    hic10::put(header, result.count, 4); hic10::put(header, 0, 4);
+    result.position = output.write(header);
+    std::vector<unsigned char> copy(8 * 1024 * 1024);
+    uint64_t remaining = uint64_t(result.count) * 16;
+    while (remaining) {
+        size_t n = static_cast<size_t>(std::min<uint64_t>(copy.size(), remaining));
+        index_file.read(copy.data(), n);
+        output.write(copy.data(), n);
+        remaining -= n;
+    }
+    index_file.close();
+    return result;
+}
+
+std::string pair_part_path(const std::string &directory, const PairInfo &pair) {
+    std::ostringstream name;
+    name << "pair-" << std::setfill('0') << std::setw(5) << pair.chr1 << '-'
+         << std::setw(5) << pair.chr2 << ".v10.hic";
+    return join_path(directory, name.str());
+}
+
+void validate_fragment_header(const hic10::Header &header,
+                              const StageManifest &stage,
+                              const BuildManifest &build) {
+    require(header.chromosomes.size() == stage.chromosomes.size(),
+            "pair fragment chromosome table differs from stage manifest");
+    for (size_t i = 0; i < stage.chromosomes.size(); ++i)
+        require(header.chromosomes[i].name == stage.chromosomes[i].name &&
+                    header.chromosomes[i].length == stage.chromosomes[i].length,
+                "pair fragment chromosome table differs from stage manifest");
+    require(header.resolutions[1].empty() &&
+                header.resolutions[0].size() == build.resolutions.size(),
+            "pair fragment resolutions differ from build manifest");
+    for (size_t i = 0; i < build.resolutions.size(); ++i)
+        require(header.resolutions[0][i].bin == build.resolutions[i],
+                "pair fragment resolutions differ from build manifest");
+    require(header.norms.empty(),
+            "pair fragments must omit vectors; supply --vectors to merge-pairs");
+}
+
+Bytes canonical_fragment_header(hic10::Reader &reader) {
+    Bytes header = reader.read_bytes(0, reader.header_length());
+    require(header.size() >= 32, "truncated pair fragment header");
+    std::fill(header.begin() + 16, header.begin() + 32, 0);
+    return header;
+}
+
+void copy_relocated_matrix(const std::string &path, hic10::Reader &reader,
+                           Output &output, uint64_t old_begin, uint64_t old_end,
+                           uint64_t new_begin) {
+    require(old_begin <= old_end && old_end <= reader.file_size(),
+            "invalid pair fragment matrix section");
+    std::vector<uint64_t> fields = reader.matrix_relocation_fields();
+    for (uint64_t field : fields)
+        require(field >= old_begin && field <= old_end - 8,
+                "pair fragment relocation field lies outside matrix section");
+
+    File input(path, "rb");
+    input.seek(old_begin);
+    std::vector<unsigned char> buffer(8 * 1024 * 1024);
+    uint64_t position = old_begin;
+    size_t field_index = 0;
+    while (position < old_end) {
+        uint64_t length = std::min<uint64_t>(buffer.size(), old_end - position);
+        if (field_index < fields.size() && fields[field_index] < position + length &&
+            fields[field_index] + 8 > position + length)
+            length = fields[field_index] - position;
+        require(length, "cannot align pair fragment relocation buffer");
+        input.read(buffer.data(), static_cast<size_t>(length));
+        const uint64_t end = position + length;
+        while (field_index < fields.size() && fields[field_index] + 8 <= end) {
+            const uint64_t field = fields[field_index++];
+            require(field >= position, "unordered pair fragment relocation fields");
+            unsigned char *word = buffer.data() + (field - position);
+            const uint64_t old_value = get_u64(word);
+            require(old_value >= old_begin && old_value < old_end,
+                    "pair fragment pointer lies outside matrix section");
+            require(old_value - old_begin <= UINT64_MAX - new_begin,
+                    "relocated V10 pointer overflow");
+            put_u64(word, new_begin + (old_value - old_begin));
+        }
+        output.write(buffer.data(), static_cast<size_t>(length));
+        position = end;
+    }
+    require(field_index == fields.size(), "unprocessed pair fragment relocation fields");
+}
+
+void write_footer(Output &output, std::vector<MatrixEntry> matrices) {
     std::sort(matrices.begin(), matrices.end(), [](const auto &x, const auto &y) {
         return std::tie(x.a, x.b) < std::tie(y.a, y.b);
     });
@@ -923,8 +1060,331 @@ void write_v10(const std::string &stage_path, const std::string &build_path,
     uint64_t footer_position = output.write(footer);
     Bytes locator; hic10::put(locator, footer_position, 8); hic10::put(locator, footer.size(), 8);
     output.patch(16, locator);
+}
+
+} // namespace
+
+void write_v10(const std::string &stage_path, const std::string &build_path,
+               const std::string &output_path, const WriteOptions &options) {
+    StageManifest stage = read_stage_manifest(stage_path);
+    BuildManifest build = read_build_manifest(build_path);
+    require(build.source_fingerprint == stage.source_fingerprint,
+            "stage and build manifests refer to different sources");
+    require(options.memory_bytes >= 1024 * 1024, "writer memory budget is too small");
+    require(options.block_bins && options.block_bins <= 4096, "invalid block bin minimum");
+    require(options.threads > 0, "writer thread count must be positive");
+    require(options.resolution_batch > 0, "resolution batch must be positive");
+    require(options.pair_index == std::numeric_limits<size_t>::max() ||
+                options.pair_index < stage.pairs.size(),
+            "writer pair index is outside stage manifest");
+    require(options.compression_level >= ZSTD_minCLevel() &&
+                options.compression_level <= ZSTD_maxCLevel(), "invalid Zstandard level");
+    std::string temporary_directory = options.temporary_directory.empty()
+        ? join_path(build_path.substr(0, build_path.find_last_of('/')), "block-work")
+        : options.temporary_directory;
+    if (temporary_directory == "block-work") temporary_directory = "./block-work";
+    make_directory(temporary_directory);
+
+    WriterState state = prepare_writer_state(stage, build, options);
+    hic10::Header &header = state.header;
+
+    Output output(output_path, make_header(header));
+    std::unique_ptr<ThreadPool> compression_pool(
+        options.threads > 1 ? new ThreadPool(static_cast<size_t>(options.threads)) : nullptr);
+    std::vector<MatrixEntry> matrices;
+    for (size_t pair_index = 0; pair_index < stage.pairs.size(); ++pair_index) {
+        if (options.pair_index != std::numeric_limits<size_t>::max() &&
+            pair_index != options.pair_index)
+            continue;
+        const PairInfo &pair = stage.pairs[pair_index];
+        uint32_t a = pair.chr1, b = pair.chr2;
+        const uint32_t n = hic10::narrow(header.resolutions[0].size());
+        Bytes meta;
+        hic10::magic(meta, "H10M"); hic10::put(meta, 1, 4);
+        hic10::put(meta, a, 4); hic10::put(meta, b, 4); hic10::put(meta, n, 4); hic10::put(meta, 0, 4);
+        meta.resize(24 + uint64_t(n) * 76, 0);
+        uint64_t meta_position = output.write(meta);
+        matrices.push_back({a, b, meta_position, meta.size()});
+        std::cerr << "Writing V10 matrix " << stage.chromosomes[a].name << " x "
+                  << stage.chromosomes[b].name << "\n";
+        const bool rotated = a == b;
+        auto publish = [&](uint32_t ri, std::pair<uint64_t, uint64_t> statistics,
+                           BlockBuild block_build) {
+            const auto &resolution = header.resolutions[0][ri];
+            uint64_t column_bins = header.bins(a, 0, ri), row_bins = header.bins(b, 0, ri);
+            uint32_t block_bins = choose_block_bins(column_bins, row_bins, resolution.bin,
+                                                    options.block_bins, rotated);
+            uint32_t columns = hic10::narrow(hic10::ceil_div(column_bins, block_bins));
+            WrittenBlocks written;
+            if (!resolution.mode)
+                written = write_block_build(output, std::move(block_build),
+                                            temporary_directory, options,
+                                            compression_pool.get());
+            Bytes descriptor;
+            hic10::put(descriptor, 0, 1); hic10::put(descriptor, resolution.mode, 1);
+            hic10::put(descriptor, resolution.aggregation, 1); hic10::put(descriptor, 0, 1);
+            hic10::put(descriptor, ri, 4); hic10::put(descriptor, resolution.bin, 4);
+            hic10::put(descriptor, resolution.source, 4); hic10::put(descriptor, rotated, 1);
+            hic10::put(descriptor, 0, 3); hic10::put(descriptor, statistics.second, 8);
+            hic10::put(descriptor, statistics.first, 8);
+            hic10::put(descriptor, 0x7fc00000, 4); hic10::put(descriptor, 0x7fc00000, 4);
+            hic10::put(descriptor, block_bins, 4); hic10::put(descriptor, columns, 4);
+            hic10::put(descriptor, written.position, 8); hic10::put(descriptor, written.length, 8);
+            hic10::put(descriptor, written.count, 4); hic10::put(descriptor, 0, 4);
+            output.patch(meta_position + 24 + uint64_t(ri) * 76, descriptor);
+        };
+
+        if (!build.root_only) {
+            for (uint32_t ri = 0; ri < header.resolutions[0].size(); ++ri) {
+                const auto &resolution = header.resolutions[0][ri];
+                uint64_t column_bins = header.bins(a, 0, ri), row_bins = header.bins(b, 0, ri);
+                auto found = build.cells.find(std::make_tuple(a, b, resolution.bin));
+                require(found != build.cells.end(),
+                        "build manifest is missing a matrix resolution");
+                if (resolution.mode) {
+                    publish(ri, run_statistics(found->second, column_bins, row_bins, rotated), {});
+                } else {
+                    uint32_t block_bins = choose_block_bins(column_bins, row_bins,
+                                                            resolution.bin,
+                                                            options.block_bins, rotated);
+                    uint32_t columns = hic10::narrow(
+                        hic10::ceil_div(column_bins, block_bins));
+                    BlockBuild prepared = create_block_runs(
+                        found->second, temporary_directory, options.memory_bytes,
+                        block_bins, columns, column_bins, row_bins, rotated);
+                    auto statistics = prepared.statistics;
+                    publish(ri, statistics, std::move(prepared));
+                }
+            }
+            continue;
+        }
+
+        auto root_found = build.cells.find(
+            std::make_tuple(a, b, build.resolutions.front()));
+        require(root_found != build.cells.end(),
+                "root-only build is missing a chromosome pair");
+        const RunInfo &root = root_found->second;
+        std::vector<uint32_t> materialized, derived;
+        for (uint32_t ri = 0; ri < header.resolutions[0].size(); ++ri)
+            (header.resolutions[0][ri].mode ? derived : materialized).push_back(ri);
+
+        struct BlockPipeline {
+            uint32_t ri = 0;
+            std::unique_ptr<RollupAccumulator> rollup;
+            std::unique_ptr<BlockRunBuilder> builder;
+        };
+        struct StatisticPipeline {
+            uint32_t ri = 0;
+            std::unique_ptr<RollupAccumulator> rollup;
+            std::unique_ptr<MatrixStatistics> statistics;
+        };
+        for (size_t begin = 0; begin < materialized.size(); begin += options.resolution_batch) {
+            const size_t end = std::min(materialized.size(), begin + options.resolution_batch);
+            const uint64_t per_resolution_memory = options.memory_bytes / (end - begin);
+            std::vector<BlockPipeline> blocks;
+            for (size_t at = begin; at < end; ++at) {
+                uint32_t ri = materialized[at];
+                const auto &resolution = header.resolutions[0][ri];
+                uint64_t column_bins = header.bins(a, 0, ri), row_bins = header.bins(b, 0, ri);
+                uint32_t block_bins = choose_block_bins(column_bins, row_bins,
+                                                        resolution.bin,
+                                                        options.block_bins, rotated);
+                uint32_t columns = hic10::narrow(hic10::ceil_div(column_bins, block_bins));
+                RunInfo metadata = root;
+                metadata.resolution = resolution.bin;
+                metadata.records = metadata.checksum = 0;
+                BlockPipeline pipeline;
+                pipeline.ri = ri;
+                if (resolution.bin != root.resolution)
+                    pipeline.rollup.reset(new RollupAccumulator(root.resolution,
+                                                                resolution.bin));
+                pipeline.builder.reset(new BlockRunBuilder(
+                    metadata, temporary_directory, per_resolution_memory,
+                    block_bins, columns, column_bins, row_bins, rotated));
+                blocks.push_back(std::move(pipeline));
+            }
+            std::vector<StatisticPipeline> statistics;
+            if (begin == 0) {
+                for (uint32_t ri : derived) {
+                    const auto &resolution = header.resolutions[0][ri];
+                    StatisticPipeline pipeline;
+                    pipeline.ri = ri;
+                    pipeline.rollup.reset(new RollupAccumulator(root.resolution,
+                                                                resolution.bin));
+                    pipeline.statistics.reset(new MatrixStatistics(
+                        header.bins(a, 0, ri), header.bins(b, 0, ri), rotated));
+                    statistics.push_back(std::move(pipeline));
+                }
+            }
+            RunReader input(root);
+            CellRecord cell;
+            while (input.next(cell)) {
+                for (auto &pipeline : blocks) {
+                    if (pipeline.rollup)
+                        pipeline.rollup->accept(cell, [&](const CellRecord &rolled) {
+                            pipeline.builder->add(rolled);
+                        });
+                    else
+                        pipeline.builder->add(cell);
+                }
+                for (auto &pipeline : statistics)
+                    pipeline.rollup->accept(cell, [&](const CellRecord &rolled) {
+                        pipeline.statistics->add(rolled);
+                    });
+            }
+            for (auto &pipeline : blocks) {
+                if (pipeline.rollup)
+                    pipeline.rollup->finish([&](const CellRecord &rolled) {
+                        pipeline.builder->add(rolled);
+                    });
+                BlockBuild prepared = pipeline.builder->finish();
+                auto result = prepared.statistics;
+                publish(pipeline.ri, result, std::move(prepared));
+            }
+            for (auto &pipeline : statistics) {
+                pipeline.rollup->finish([&](const CellRecord &rolled) {
+                    pipeline.statistics->add(rolled);
+                });
+                publish(pipeline.ri, pipeline.statistics->result(), {});
+            }
+        }
+    }
+    if (!options.vector_manifest.empty())
+        write_vectors(output, header, state.vectors, options.compression_level,
+                      compression_pool.get(), options.threads);
+    write_footer(output, std::move(matrices));
     output.publish();
     std::cerr << "Large-data V10 matrix assembly complete: " << output_path << "\n";
+}
+
+void print_write_tasks(const std::string &stage_path, const std::string &build_path,
+                       const std::string &parts_directory, const std::string &output) {
+    StageManifest stage = read_stage_manifest(stage_path);
+    BuildManifest build = read_build_manifest(build_path, false);
+    require(build.source_fingerprint == stage.source_fingerprint,
+            "stage and build manifests refer to different sources");
+    for (size_t pair = 0; pair < stage.pairs.size(); ++pair)
+        std::cout << "write-pair\t" << pair << '\t'
+                  << pair_part_path(parts_directory, stage.pairs[pair]) << "\n";
+    std::cout << "merge-pairs\t0\t" << output << "\n";
+}
+
+void write_pair_v10(const std::string &stage_path, const std::string &build_path,
+                    const std::string &parts_directory, size_t pair_index,
+                    const WriteOptions &options) {
+    require(options.vector_manifest.empty(),
+            "write-pair does not duplicate normalization vectors; pass them to merge-pairs");
+    StageManifest stage = read_stage_manifest(stage_path);
+    BuildManifest build = read_build_manifest(build_path, false);
+    require(build.source_fingerprint == stage.source_fingerprint,
+            "stage and build manifests refer to different sources");
+    require(pair_index < stage.pairs.size(), "writer pair index is outside stage manifest");
+    make_directory(parts_directory);
+    const PairInfo &pair = stage.pairs[pair_index];
+    const std::string output = pair_part_path(parts_directory, pair);
+    WriteOptions pair_options = options;
+    pair_options.pair_index = pair_index;
+    if (path_exists(output)) {
+        hic10::Reader reader(output);
+        WriterState expected = prepare_writer_state(stage, build, pair_options);
+        Bytes expected_header = make_header(expected.header);
+        Bytes actual_header = canonical_fragment_header(reader);
+        require(actual_header == expected_header,
+                "existing pair fragment was produced with different writer options "
+                "(actual header " + std::to_string(actual_header.size()) + " bytes/" +
+                hex64(fnv1a(actual_header.data(), actual_header.size())) +
+                ", expected " + std::to_string(expected_header.size()) + " bytes/" +
+                hex64(fnv1a(expected_header.data(), expected_header.size())) + ")");
+        require(reader.matrices().size() == 1 &&
+                    reader.matrices()[0].chr1 == pair.chr1 &&
+                    reader.matrices()[0].chr2 == pair.chr2,
+                "existing pair fragment contains the wrong matrix");
+        for (const auto &locator : reader.vector_indexes())
+            require(!locator.position && !locator.length,
+                    "existing pair fragment contains normalization vectors");
+        require(reader.footer().position + reader.footer().length == reader.file_size(),
+                "existing pair fragment has unexpected trailing data");
+        reader.matrix_relocation_fields();
+        std::cerr << "Pair writer task " << pair_index << " already complete\n";
+        return;
+    }
+    write_v10(stage_path, build_path, output, pair_options);
+}
+
+void merge_pair_v10(const std::string &stage_path, const std::string &build_path,
+                    const std::string &parts_directory, const std::string &output_path,
+                    const WriteOptions &options) {
+    StageManifest stage = read_stage_manifest(stage_path);
+    BuildManifest build = read_build_manifest(build_path, false);
+    require(build.source_fingerprint == stage.source_fingerprint,
+            "stage and build manifests refer to different sources");
+    require(!stage.pairs.empty(), "stage manifest has no chromosome pairs");
+    require(options.threads > 0, "writer thread count must be positive");
+    require(options.compression_level >= ZSTD_minCLevel() &&
+                options.compression_level <= ZSTD_maxCLevel(), "invalid Zstandard level");
+    require(options.derived.empty(),
+            "merge-pairs inherits resolution derivations from pair fragments");
+
+    for (const PairInfo &pair : stage.pairs)
+        require(output_path != pair_part_path(parts_directory, pair),
+                "merge output must not overwrite a pair fragment");
+
+    const std::string first_path = pair_part_path(parts_directory, stage.pairs.front());
+    hic10::Reader first(first_path);
+    validate_fragment_header(first.header(), stage, build);
+    Bytes fragment_header = canonical_fragment_header(first);
+    hic10::Header final_header = first.header();
+    VectorManifest vectors;
+    if (!options.vector_manifest.empty()) {
+        vectors = read_vector_manifest(options.vector_manifest);
+        require(vectors.source_fingerprint == stage.source_fingerprint,
+                "vector manifest refers to a different source");
+        final_header.norms = vectors.norms;
+    }
+
+    Output output(output_path, make_header(final_header));
+    std::vector<MatrixEntry> matrices;
+    matrices.reserve(stage.pairs.size());
+    for (size_t pair_index = 0; pair_index < stage.pairs.size(); ++pair_index) {
+        const PairInfo &expected = stage.pairs[pair_index];
+        const std::string path = pair_part_path(parts_directory, expected);
+        hic10::Reader fragment(path);
+        validate_fragment_header(fragment.header(), stage, build);
+        require(fragment.header_length() == fragment_header.size() &&
+                    canonical_fragment_header(fragment) == fragment_header,
+                "pair fragments have different headers");
+        require(fragment.matrices().size() == 1 &&
+                    fragment.matrices()[0].chr1 == expected.chr1 &&
+                    fragment.matrices()[0].chr2 == expected.chr2,
+                "pair fragment contains the wrong matrix: " + path);
+        for (const auto &locator : fragment.vector_indexes())
+            require(!locator.position && !locator.length,
+                    "pair fragment contains normalization vectors: " + path);
+        require(fragment.footer().position + fragment.footer().length == fragment.file_size(),
+                "pair fragment has unexpected trailing data: " + path);
+        const uint64_t old_begin = fragment.header_length();
+        const uint64_t old_end = fragment.footer().position;
+        const uint64_t new_begin = output.position();
+        hic10::MatrixKey key{expected.chr1, expected.chr2};
+        hic10::FileLocator matrix = fragment.matrix_location(key);
+        require(matrix.position >= old_begin && matrix.position <= old_end &&
+                    matrix.length <= old_end - matrix.position,
+                "pair fragment matrix descriptor lies outside matrix section");
+        copy_relocated_matrix(path, fragment, output, old_begin, old_end, new_begin);
+        matrices.push_back({expected.chr1, expected.chr2,
+                            new_begin + (matrix.position - old_begin), matrix.length});
+        std::cerr << "Merged V10 matrix " << stage.chromosomes[expected.chr1].name
+                  << " x " << stage.chromosomes[expected.chr2].name << "\n";
+    }
+
+    std::unique_ptr<ThreadPool> compression_pool(
+        options.threads > 1 ? new ThreadPool(static_cast<size_t>(options.threads)) : nullptr);
+    if (!options.vector_manifest.empty())
+        write_vectors(output, final_header, vectors, options.compression_level,
+                      compression_pool.get(), options.threads);
+    write_footer(output, std::move(matrices));
+    output.publish();
+    std::cerr << "Merged pair fragments into V10 file: " << output_path << "\n";
 }
 
 } // namespace hic10large

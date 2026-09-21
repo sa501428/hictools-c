@@ -122,6 +122,34 @@ def main():
         assert hic.vector_locs == [(0, 0), (0, 0), (0, 0)]
         assert not list((build / "block-work").glob("*"))
 
+        # Matrix assembly can be distributed one chromosome pair per job and
+        # merged without decoding or recompressing block payloads.
+        pair_parts = root / "pair-parts"
+        write_plan = run([executable, "plan-write", stage / "stage.manifest",
+                          build / "build.manifest", pair_parts,
+                          root / "merged.hic"]).stdout.splitlines()
+        assert len([line for line in write_plan if line.startswith("write-pair\t")]) == 3
+        assert write_plan[-1].startswith("merge-pairs\t")
+        for pair in range(3):
+            run([executable, "write-pair", "--genome", "tiny", "--memory", "1MiB",
+                 "--resolution-batch", "2", stage / "stage.manifest",
+                 build / "build.manifest", pair_parts, pair])
+        resumed_pair = run([executable, "write-pair", "--genome", "tiny",
+                            "--memory", "1MiB", stage / "stage.manifest",
+                            build / "build.manifest", pair_parts, 0])
+        assert "already complete" in resumed_pair.stderr
+        merged = root / "merged.hic"
+        run([executable, "merge-pairs", stage / "stage.manifest",
+             build / "build.manifest", pair_parts, merged])
+        merged_hic = Hic(merged)
+        for pair in ((0, 0), (0, 1), (1, 1)):
+            for resolution in (1, 2, 4):
+                assert merged_hic.records(*pair, resolution) == \
+                       hic.records(*pair, resolution)
+        validated = run([executable, "validate-v10", "--matrix", "0:0:1", merged])
+        assert "matrices\t3" in validated.stdout
+        assert "matrix\t0\t0\t1\t3" in validated.stdout
+
         # Low-scratch mode retains only the finest cells. Writer and
         # normalization tasks roll up one requested resolution at a time and
         # retire the temporary run immediately.
@@ -169,6 +197,16 @@ def main():
             assert len(hic.vectors[1, None, None, 0, resolution][0]) == bins
             assert len(hic.vectors[2, "VC", None, 0, resolution][0]) == bins
             assert len(hic.vectors[2, "VC_SQRT", None, 0, resolution][0]) == bins
+
+        merged_normalized = root / "merged-normalized.hic"
+        run([executable, "merge-pairs", "--vectors", vectors / "vectors.manifest",
+             "-t", "2", stage / "stage.manifest", build / "build.manifest",
+             pair_parts, merged_normalized])
+        merged_norm_hic = Hic(merged_normalized)
+        assert set(merged_norm_hic.vectors) == set(hic.vectors)
+        for key in hic.vectors:
+            close_words(merged_norm_hic.vectors[key][0], hic.vectors[key][0], 0)
+            assert dict(merged_norm_hic.vectors[key][1]) == dict(hic.vectors[key][1])
 
         root_vectors = root / "root-vectors"
         run([executable, "normalize", "--no-scale", "--memory", "1MiB",

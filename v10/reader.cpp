@@ -180,6 +180,11 @@ Reader::~Reader() {
     if (file_)
         std::fclose(file_);
 }
+FileLocator Reader::matrix_location(MatrixKey key) const {
+    auto found = matrix_locations_.find(key);
+    check(found != matrix_locations_.end(), "missing V10 matrix");
+    return found->second;
+}
 Bytes Reader::read_bytes(uint64_t position, uint64_t length) {
     check(length <= RECORD_LIMIT && position <= file_size_ && length <= file_size_ - position,
           "V10 file interval out of bounds");

@@ -12,6 +12,7 @@ add_executable(hic_v10_large
     vectors.cpp
     normalize.cpp
     scale.cpp
+    ${PROJECT_SOURCE_DIR}/v10/reader.cpp
 )
 target_include_directories(hic_v10_large PRIVATE
     ${PROJECT_SOURCE_DIR}
