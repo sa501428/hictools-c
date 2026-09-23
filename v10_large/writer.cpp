@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <deque>
 #include <future>
@@ -877,16 +878,18 @@ WriterState prepare_writer_state(const StageManifest &stage, const BuildManifest
     return state;
 }
 
-std::pair<uint64_t, uint64_t> run_statistics(const RunInfo &run,
-                                             uint64_t columns, uint64_t rows,
-                                             bool cis) {
+std::pair<uint64_t, uint64_t> derived_statistics(const RunInfo &source,
+                                                 uint32_t target_resolution,
+                                                 uint64_t columns, uint64_t rows,
+                                                 bool cis) {
     MatrixStatistics statistics(columns, rows, cis);
-    RunReader reader(run);
+    RollupAccumulator rollup(source.resolution, target_resolution);
+    RunReader reader(source);
     CellRecord cell;
-    while (reader.next(cell)) statistics.add(cell);
-    auto result = statistics.result();
-    require(result.first == run.records, "cell run record count changed");
-    return result;
+    while (reader.next(cell))
+        rollup.accept(cell, [&](const CellRecord &rolled) { statistics.add(rolled); });
+    rollup.finish([&](const CellRecord &rolled) { statistics.add(rolled); });
+    return statistics.result();
 }
 
 struct WrittenBlocks {
@@ -1022,9 +1025,15 @@ void copy_relocated_matrix(const std::string &path, hic10::Reader &reader,
     size_t field_index = 0;
     while (position < old_end) {
         uint64_t length = std::min<uint64_t>(buffer.size(), old_end - position);
-        if (field_index < fields.size() && fields[field_index] < position + length &&
-            fields[field_index] + 8 > position + length)
-            length = fields[field_index] - position;
+        // A buffer must not end in the middle of a relocation field. One buffer
+        // usually consumes many fields, so the one that can straddle the end is
+        // the last field starting before it, not the first unconsumed one.
+        {
+            const auto first = fields.begin() + static_cast<std::ptrdiff_t>(field_index);
+            const auto bound = std::lower_bound(first, fields.end(), position + length);
+            if (bound != first && *(bound - 1) + 8 > position + length)
+                length = *(bound - 1) - position;
+        }
         require(length, "cannot align pair fragment relocation buffer");
         input.read(buffer.data(), static_cast<size_t>(length));
         const uint64_t end = position + length;
@@ -1139,12 +1148,17 @@ void write_v10(const std::string &stage_path, const std::string &build_path,
             for (uint32_t ri = 0; ri < header.resolutions[0].size(); ++ri) {
                 const auto &resolution = header.resolutions[0][ri];
                 uint64_t column_bins = header.bins(a, 0, ri), row_bins = header.bins(b, 0, ri);
-                auto found = build.cells.find(std::make_tuple(a, b, resolution.bin));
-                require(found != build.cells.end(),
-                        "build manifest is missing a matrix resolution");
                 if (resolution.mode) {
-                    publish(ri, run_statistics(found->second, column_bins, row_bins, rotated), {});
+                    const auto &source = header.resolutions[0][resolution.source];
+                    auto found = build.cells.find(std::make_tuple(a, b, source.bin));
+                    require(found != build.cells.end(),
+                            "build manifest is missing a derived source resolution");
+                    publish(ri, derived_statistics(found->second, resolution.bin,
+                                                    column_bins, row_bins, rotated), {});
                 } else {
+                    auto found = build.cells.find(std::make_tuple(a, b, resolution.bin));
+                    require(found != build.cells.end(),
+                            "build manifest is missing a matrix resolution");
                     uint32_t block_bins = choose_block_bins(column_bins, row_bins,
                                                             resolution.bin,
                                                             options.block_bins, rotated);

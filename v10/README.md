@@ -35,7 +35,7 @@ merged-nodups/medium/long, header-described DCIC pairs, gzip text, `.bin`, and
 `.bn`. The default BP resolution set is the same as V9. `-f short` selects the
 4/5-column extra-short parser; use auto detection or `-f mnd` for Juicer's
 8/9-column short layout. See `hic_v10 pre --help` for filtering and compression
-options. Whenever advertised, 20 and 50 bp are derived from 10 bp, 200 and 500
+options. Whenever advertised, 2 and 5 bp are derived from 1 bp, 20 and 50 bp from 10 bp, 200 and 500
 bp from 100 bp, and 2 kb from 1 kb. The 500 kb level is materialized. These are
 format requirements and do not need `--derive` flags.
 
@@ -168,10 +168,12 @@ unsupported/malformed input, and arithmetic overflow produce errors.
 
 ## Derived resolutions
 
-The five expensive high-resolution intermediates are always derived:
+The seven fine-resolution intermediates are always derived:
 
 | Target | Required materialized source |
 |---:|---:|
+| 2 bp | 1 bp |
+| 5 bp | 1 bp |
 | 20 bp | 10 bp |
 | 50 bp | 10 bp |
 | 200 bp | 100 bp |

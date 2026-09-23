@@ -112,8 +112,9 @@ small number of sequential root-cell passes in the writer and one pass per
 requested coarser resolution in normalization.
 
 Omit `--root-only` on every build command to select the faster, high-scratch
-mode. In that mode coarser resolutions never rescan HBS: the nearest completed
-divisor is consumed and retained in a rollup DAG. Both modes aggregate one
+mode. In that mode materialized coarser resolutions never rescan HBS: the nearest completed
+divisor is consumed and retained in a rollup DAG. Mandatory derived levels,
+including 2 and 5 bp from 1 bp, have no retained cell stream. Both modes aggregate one
 coarsened row at a time in canonical order, using a sparse open-addressing row
 accumulator rather than a chromosome-width array. Neither mode externally sorts
 a coarser resolution.
@@ -248,8 +249,8 @@ temporary encoded-block sidecar, so an unusually dense block cannot exhaust
 RAM. The cache/raw/compressed buffers are bounded per compression worker. A
 block whose raw or compressed payload exceeds V10's own `u32` length fields
 fails explicitly. Mandatory V10 derived-resolution declarations are applied,
-while the independently rolled-up cells remain available for norms and expected
-vectors.
+while derived cells are rolled up from their required materialized sources when
+computing norms and expected vectors.
 
 Use `hic_v10_large validate-v10 output.hic` for a streaming structural check.
 Add `--matrix CHR1_ID:CHR2_ID:BIN` one or more times to fully decode selected

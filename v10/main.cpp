@@ -17,7 +17,7 @@ static void usage() {
            "  -t N               Pair/block writer workers (default 4)\n"
            "  --block-bins N     Additional minimum logical block width (max 4096)\n"
            "  --derive T:S       Add a nonstandard derived BP resolution; repeatable\n"
-           "                     20/50/200/500/2000 BP are always derived; 500 kb is stored\n"
+           "                     2/5/20/50/200/500/2000 BP are always derived; 500 kb is stored\n"
            "  --scores           Force SCORE_FLOAT32, even for integral values\n"
            "  -T DIR             Run-scoped spool parent; automatically cleaned (default /tmp)\n"
            "  --read-ahead N     Maximum outstanding chromosome pairs (default: -t)\n\n"

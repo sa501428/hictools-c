@@ -99,15 +99,15 @@ def main():
         run([executable, "build-cells", "-r", "1,2,4", "--memory", "1MiB",
              "--fan-in", "2", stage / "stage.manifest", build])
         files = sorted((build / "cells").glob("*-cells.h10r"))
-        assert len(files) == 9
+        assert len(files) == 6
         cis = [p for p in files if "pair-00000-00000" in p.name]
-        assert len(cis) == 3
+        assert len(cis) == 2
         finest = next(p for p in cis if "-r1-" in p.name)
         resolution, records = read_run(finest)
         assert resolution == 1
         assert records == [(1, 2, 3), (5, 8, 6), (9, 9, (1 << 53) + 2)]
-        r2 = next(p for p in cis if "-r2-" in p.name)
-        assert read_run(r2) == (2, [(0, 1, 3), (2, 4, 6), (4, 4, (1 << 53) + 2)])
+        assert not any("-r2-" in p.name for p in files)
+        expected_r2 = [(0, 1, 3), (2, 4, 6), (4, 4, (1 << 53) + 2)]
         r4 = next(p for p in cis if "-r4-" in p.name)
         assert read_run(r4) == (4, [(0, 0, 3), (1, 2, 6), (2, 2, (1 << 53) + 2)])
         output = root / "large.hic"
@@ -115,12 +115,26 @@ def main():
              stage / "stage.manifest", build / "build.manifest", output])
         hic = Hic(output)
         assert hic.records(0, 0, 1) == records
-        assert hic.records(0, 0, 2) == read_run(r2)[1]
+        assert hic.records(0, 0, 2) == expected_r2
+        assert hic.res[0][1][1:] == (1, 1, 0, 0)
         assert hic.records(0, 0, 4) == read_run(r4)[1]
         assert hic.records(0, 1, 1) == [(3, 7, 5)]
         assert hic.records(1, 1, 1) == [(2, 5, 7)]
         assert hic.vector_locs == [(0, 0), (0, 0), (0, 0)]
         assert not list((build / "block-work").glob("*"))
+
+        fine_build = root / "fine-build"
+        run([executable, "build-cells", "-r", "1,2,5", "--memory", "1MiB",
+             stage / "stage.manifest", fine_build])
+        assert all("-r2-" not in cell.name and "-r5-" not in cell.name
+                   for cell in (fine_build / "cells").glob("*-cells.h10r"))
+        fine_output = root / "fine.hic"
+        run([executable, "write", "--genome", "tiny", "--memory", "1MiB",
+             stage / "stage.manifest", fine_build / "build.manifest", fine_output])
+        fine = Hic(fine_output)
+        assert fine.res[0][1][1:] == (1, 1, 0, 0)
+        assert fine.res[0][2][1:] == (1, 1, 0, 0)
+        assert fine.records(0, 0, 5) == [(0, 0, 3), (1, 1, (1 << 53) + 8)]
 
         # Matrix assembly can be distributed one chromosome pair per job and
         # merged without decoding or recompressing block payloads.

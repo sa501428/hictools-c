@@ -3,6 +3,7 @@
 #include "io.h"
 #include "manifest.h"
 #include "sort.h"
+#include "../v10/format.h"
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
@@ -55,6 +56,15 @@ uint32_t parent_resolution(const std::vector<uint32_t> &completed, uint32_t targ
     return parent;
 }
 
+std::vector<uint32_t> stored_resolutions(const std::vector<uint32_t> &resolutions,
+                                         bool root_only) {
+    if (root_only) return {resolutions.front()};
+    std::vector<uint32_t> stored;
+    for (uint32_t resolution : resolutions)
+        if (!hic10::required_derived_source(resolution)) stored.push_back(resolution);
+    return stored;
+}
+
 std::vector<uint32_t> checked_resolutions(const StageManifest &stage,
                                           const BuildOptions &options) {
     require(!options.resolutions.empty(), "no build resolutions");
@@ -67,6 +77,10 @@ std::vector<uint32_t> checked_resolutions(const StageManifest &stage,
     for (uint32_t resolution : resolutions)
         require(resolution && resolution % stage.source_resolution == 0,
                 "build resolution must be a multiple of HBS resolution");
+    for (uint32_t resolution : resolutions)
+        if (uint32_t source = hic10::required_derived_source(resolution))
+            require(std::binary_search(resolutions.begin(), resolutions.end(), source),
+                    "mandatory derived resolution requires its materialized source");
     return resolutions;
 }
 
@@ -226,11 +240,12 @@ std::vector<RunInfo> read_pair_manifest(const std::string &path, uint64_t finger
         result.push_back(std::move(run));
         in >> tag;
     }
-    const size_t wanted = root_only ? 1 : resolutions.size();
+    const size_t wanted = stored_resolutions(resolutions, root_only).size();
     require(tag == "end" && result.size() == wanted, "truncated pair manifest");
-    if (root_only)
-        require(result.front().resolution == resolutions.front(),
-                "root-only pair is missing the finest resolution");
+    const auto expected = stored_resolutions(resolutions, root_only);
+    for (size_t i = 0; i < expected.size(); ++i)
+        require(result[i].resolution == expected[i],
+                "pair manifest has an unexpected cell resolution");
     return result;
 }
 
@@ -388,10 +403,7 @@ void build_pair_cells(const std::string &stage_path, const std::string &director
     std::vector<uint32_t> completed;
     std::cerr << "Building cells for " << stage.chromosomes[pair.chr1].name << " x "
               << stage.chromosomes[pair.chr2].name << " (" << pair.records << " records)\n";
-    const size_t materialized_count = options.root_only ? 1 : resolutions.size();
-    for (size_t resolution_index = 0; resolution_index < materialized_count;
-         ++resolution_index) {
-        uint32_t resolution = resolutions[resolution_index];
+    for (uint32_t resolution : stored_resolutions(resolutions, options.root_only)) {
         std::string resolution_prefix = prefix + "-r" + std::to_string(resolution);
         RunInfo merged;
         if (resolution == resolutions.front()) {
@@ -569,9 +581,11 @@ CellMaterialization materialize_cell(const BuildManifest &build, uint32_t chr1,
                                      const std::string &prefix) {
     auto direct = build.cells.find(std::make_tuple(chr1, chr2, resolution));
     if (direct != build.cells.end()) return CellMaterialization(direct->second, {});
-    require(build.root_only, "build manifest is missing a matrix resolution");
-    auto root = build.cells.find(std::make_tuple(chr1, chr2, build.resolutions.front()));
-    require(root != build.cells.end(), "root-only build is missing a chromosome pair");
+    const uint32_t source_resolution = build.root_only ? build.resolutions.front()
+        : hic10::required_derived_source(resolution);
+    require(source_resolution, "build manifest is missing a matrix resolution");
+    auto root = build.cells.find(std::make_tuple(chr1, chr2, source_resolution));
+    require(root != build.cells.end(), "build is missing the derived source cell stream");
     require(resolution > root->second.resolution &&
                 resolution % root->second.resolution == 0,
             "cannot derive requested resolution from root cells");

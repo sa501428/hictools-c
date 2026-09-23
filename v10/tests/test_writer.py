@@ -57,6 +57,26 @@ def main():
         outside = p/'outside.txt'
         outside.write_text('chr1 10001 chr1 1\n')
         run([v10, 'pre', '-r', '100', outside, p/'outside.hic', chrom], ok=False)
+        fine_chrom = p/'fine.sizes'
+        fine_chrom.write_text('chr1\t20\n')
+        fine_pairs = p/'fine.txt'
+        fine_pairs.write_text('chr1 1 chr1 2\nchr1 1 chr1 2\nchr1 4 chr1 9\n')
+        fine = p/'fine.hic'
+        run([v10, 'pre', '-r', '1,2,5', fine_pairs, fine, fine_chrom])
+        fine_hic = Hic(fine)
+        assert [r[1:] for r in fine_hic.res[0]] == [
+            (0, 1, 0, 0xffffffff), (1, 1, 0, 0), (1, 1, 0, 0)]
+        assert fine_hic.records(0, 0, 1) == [(1, 2, 2), (4, 9, 1)]
+        assert fine_hic.records(0, 0, 2) == [(0, 1, 2), (2, 4, 1)]
+        assert fine_hic.records(0, 0, 5) == [(0, 0, 2), (0, 1, 1)]
+        assert not fine_hic.matrices[0, 0, 0, 2]['records']
+        assert not fine_hic.matrices[0, 0, 0, 5]['records']
+        if straw:
+            assert '0\t2\t2' in run([straw, 'observed', 'NONE', fine,
+                                      'chr1', 'chr1', 'BP', 2])
+            assert '0\t5\t1' in run([straw, 'observed', 'NONE', fine,
+                                      'chr1', 'chr1', 'BP', 5])
+        run([v10, 'pre', '-r', '2,5', fine_pairs, p/'missing-1.hic', fine_chrom], ok=False)
         # Native V10 expected values use the same ceil-based terminal-bin
         # geometry as the matrix. Rebuilding raw expected through addnorm must
         # therefore be bitwise stable when a chromosome ends in a partial bin.

@@ -164,6 +164,9 @@ struct Resolution {
 };
 inline uint32_t required_derived_source(uint32_t bin) {
     switch (bin) {
+    case 2:
+    case 5:
+        return 1;
     case 20:
     case 50:
         return 10;
