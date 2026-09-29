@@ -35,9 +35,11 @@ merged-nodups/medium/long, header-described DCIC pairs, gzip text, `.bin`, and
 `.bn`. The default BP resolution set is the same as V9. `-f short` selects the
 4/5-column extra-short parser; use auto detection or `-f mnd` for Juicer's
 8/9-column short layout. See `hic_v10 pre --help` for filtering and compression
-options. Whenever advertised, 2 and 5 bp are derived from 1 bp, 20 and 50 bp from 10 bp, 200 and 500
-bp from 100 bp, and 2 kb from 1 kb. The 500 kb level is materialized. These are
-format requirements and do not need `--derive` flags.
+options. By default, whenever advertised, 2 and 5 bp are derived from 1 bp, 20 and
+50 bp from 10 bp, 200 and 500 bp from 100 bp, and 2 kb from 1 kb. The 500 kb
+level is materialized by default. Use `--derive TARGET:SOURCE` to replace a
+default source or add another derived target, and `--materialize RESOLUTION` to
+store a target that would otherwise be derived.
 
 Each normalized chromosome pair must occupy one contiguous input block, as with
 `hic_pre`. Numeric positions are accepted in `[0, chromosomeLength]` and consumed
@@ -47,8 +49,8 @@ between the endpoints are binned exactly as provided. Each run creates
 a private `hic-v10-run-*` workspace beneath `-T` (default `/tmp`). The parser closes
 each pair spool there and hands it to a bounded worker pool while it reads ahead
 into later chromosome pairs. Workers aggregate only
-materialized resolutions into compact, disk-backed matrix sections; mandatory
-derived targets are reconstructed from their source without their own input pass
+materialized resolutions into compact, disk-backed matrix sections; derived
+targets are reconstructed from their declared source without their own input pass
 or temporary matrix. The ordered
 writer consumes those sections while pair preparation continues. By default up
 to `-t` pair jobs are active or waiting; `--read-ahead N` sets a smaller or larger
@@ -168,9 +170,9 @@ unsupported/malformed input, and arithmetic overflow produce errors.
 
 ## Derived resolutions
 
-The seven fine-resolution intermediates are always derived:
+The standard default derives these seven fine-resolution intermediates:
 
-| Target | Required materialized source |
+| Target | Default materialized source |
 |---:|---:|
 | 2 bp | 1 bp |
 | 5 bp | 1 bp |
@@ -180,10 +182,18 @@ The seven fine-resolution intermediates are always derived:
 | 500 bp | 100 bp |
 | 2 kb | 1 kb |
 
-Advertising a target requires advertising its source. The writer rejects a
-materialized mandatory target, a different source, and any attempt to derive 500
-kb. `--derive T:S` remains available only for additional nonstandard targets.
-During V9 conversion, the writer compares every mandatory or requested target
+When the default applies, advertising a target requires advertising its default
+source. `--materialize T` forces the target to be stored, while `--derive T:S`
+selects any advertised finer materialized divisor as its source. For example,
+`-r 125,250,500 --derive 250:125 --derive 500:125` stores 125 bp and derives
+both coarser levels from it. Likewise,
+`-r 50,100,150,200,300,500 --materialize 50 --derive 100:50 --derive 150:50
+--derive 200:50 --derive 300:50 --derive 500:50` stores 50 bp and derives the
+other listed levels from it. Derived sources must be direct and materialized;
+chains and nonintegral factors are rejected. The 500 kb level may also be
+explicitly derived instead of materialized.
+
+During V9 conversion, the writer compares every requested derived target
 cell against deterministic source aggregation before discarding its blocks. A
 mismatch, including a float rounding difference, fails conversion. Direct `pre`
 defines these targets from exact source aggregation and never constructs or

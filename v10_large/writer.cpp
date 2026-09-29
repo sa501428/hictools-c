@@ -851,13 +851,23 @@ WriterState prepare_writer_state(const StageManifest &stage, const BuildManifest
                 "vector manifest refers to a different source");
         header.norms = state.vectors.norms;
     }
+    std::set<uint32_t> explicit_derived, explicit_materialized;
+    for (uint32_t bin : options.materialized) {
+        header.resolution(0, bin);
+        require(explicit_materialized.insert(bin).second,
+                "duplicate materialized resolution override");
+    }
+    for (const auto &d : options.derived) {
+        require(explicit_derived.insert(d.first).second,
+                "duplicate derived resolution override");
+        require(!explicit_materialized.count(d.first),
+                "resolution cannot be both derived and materialized");
+    }
     auto derive = [&](uint32_t target_bin, uint32_t source_bin) {
         uint32_t target = header.resolution(0, target_bin);
         uint32_t source = header.resolution(0, source_bin);
         require(target_bin > source_bin && target_bin % source_bin == 0,
                 "derived target must be an integer multiple of source");
-        require(!hic10::required_materialized_resolution(target_bin),
-                "500 kb must remain materialized");
         auto &resolution = header.resolutions[0][target];
         require(!resolution.mode || resolution.source == source,
                 "conflicting derived source");
@@ -867,14 +877,14 @@ WriterState prepare_writer_state(const StageManifest &stage, const BuildManifest
     };
     for (const auto &d : options.derived) derive(d.first, d.second);
     for (const auto &resolution : header.resolutions[0])
-        if (uint32_t source = hic10::required_derived_source(resolution.bin))
+        if (uint32_t source = hic10::default_derived_source(resolution.bin);
+            source && !explicit_derived.count(resolution.bin) &&
+                !explicit_materialized.count(resolution.bin))
             derive(resolution.bin, source);
     for (const auto &resolution : header.resolutions[0])
         if (resolution.mode)
             require(!header.resolutions[0][resolution.source].mode,
                     "chained derivation is forbidden");
-    require(hic10::required_bp_resolution_policy(header.resolutions[0]),
-            "mandatory V10 resolution policy is not satisfied");
     return state;
 }
 
@@ -1339,6 +1349,8 @@ void merge_pair_v10(const std::string &stage_path, const std::string &build_path
                 options.compression_level <= ZSTD_maxCLevel(), "invalid Zstandard level");
     require(options.derived.empty(),
             "merge-pairs inherits resolution derivations from pair fragments");
+    require(options.materialized.empty(),
+            "merge-pairs inherits materialized resolutions from pair fragments");
 
     for (const PairInfo &pair : stage.pairs)
         require(output_path != pair_part_path(parts_directory, pair),

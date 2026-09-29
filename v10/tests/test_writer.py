@@ -77,6 +77,32 @@ def main():
             assert '0\t5\t1' in run([straw, 'observed', 'NONE', fine,
                                       'chr1', 'chr1', 'BP', 5])
         run([v10, 'pre', '-r', '2,5', fine_pairs, p/'missing-1.hic', fine_chrom], ok=False)
+        # The standard pyramid is a default, not a constraint. A normally
+        # derived target can be materialized and can directly source arbitrary
+        # integral target factors, including targets with standard defaults.
+        custom = p/'custom-pyramid.hic'
+        run([v10, 'pre', '-r', '50,100,150,200,300,500', '--materialize', '50',
+             '--derive', '100:50', '--derive', '150:50', '--derive', '200:50',
+             '--derive', '300:50', '--derive', '500:50',
+             p/'extra.txt', custom, chrom])
+        custom_hic = Hic(custom)
+        assert [r[1:] for r in custom_hic.res[0]] == [
+            (0, 1, 0, 0xffffffff), (1, 1, 0, 0), (1, 1, 0, 0),
+            (1, 1, 0, 0), (1, 1, 0, 0), (1, 1, 0, 0)]
+        assert custom_hic.matrices[0, 0, 0, 50]['records']
+        for resolution in (100, 150, 200, 300, 500):
+            assert not custom_hic.matrices[0, 0, 0, resolution]['records']
+        if straw:
+            assert run([straw, 'observed', 'NONE', custom,
+                        'chr1', 'chr1', 'BP', 150])
+        coarse_override = p/'derived-500kb.hic'
+        run([v10, 'pre', '-r', '100000,500000', '--derive', '500000:100000',
+             p/'extra.txt', coarse_override, chrom])
+        assert [r[1:] for r in Hic(coarse_override).res[0]] == [
+            (0, 1, 0, 0xffffffff), (1, 1, 0, 0)]
+        run([v10, 'pre', '-r', '50,100', '--materialize', '50',
+             '--derive', '100:50', '--materialize', '100',
+             p/'extra.txt', p/'conflicting-policy.hic', chrom], ok=False)
         # Native V10 expected values use the same ceil-based terminal-bin
         # geometry as the matrix. Rebuilding raw expected through addnorm must
         # therefore be bitwise stable when a chromosome ends in a partial bin.
@@ -242,6 +268,10 @@ def main():
         assert h.records(1, 1, 100) == expected100
         assert h.records(1, 1, 200) == [(0, 0, 2), (0, 1, 2), (1, 2, 1), (49, 49, 2)]
         assert h.chroms[0][0] == 'ALL' and h.records(0, 0, 1)
+        materialized_conversion = p/'converted-materialized.hic'
+        run([v10, 'convert', '--materialize', '200', original,
+             materialized_conversion])
+        assert Hic(materialized_conversion).res[0][2][1] == 0
         # Compare source norm words, including signed zeros/NaNs, without float conversion.
         data = original.read_bytes(); r = Cursor(data); r.take(16); r.string(); nvi, length = r.unpack('QQ')
         r = Cursor(data[nvi:nvi+length]); entries = []
@@ -343,8 +373,6 @@ def main():
             ['convert', converted, p/'no.hic'],
             ['convert', '--derive', '200:75', original, converted],
             ['pre', '-r', '20', p/'extra.txt', converted, chrom],
-            ['pre', '-r', '100000,500000', '--derive', '500000:100000',
-             p/'extra.txt', converted, chrom],
             ['pre', '-r', '0', p/'extra.txt', converted, chrom],
             ['pre', '--page-bytes', '1024', p/'extra.txt', converted, chrom],
             ['pre', '--wat', p/'extra.txt', converted, chrom],

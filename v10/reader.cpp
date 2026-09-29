@@ -136,8 +136,6 @@ Reader::Reader(const std::string &path) {
                       "invalid derived V10 resolution source");
         }
     }
-    check(required_bp_resolution_policy(header_.resolutions[0]),
-          "V10 mandatory BP derivation policy is not satisfied");
     if (!header_.resolutions[1].empty())
         for (auto &chr : header_.chromosomes) {
             n = c.word();

@@ -57,11 +57,18 @@ uint32_t parent_resolution(const std::vector<uint32_t> &completed, uint32_t targ
 }
 
 std::vector<uint32_t> stored_resolutions(const std::vector<uint32_t> &resolutions,
-                                         bool root_only) {
+                                         bool root_only,
+                                         const std::vector<uint32_t> &materialized) {
     if (root_only) return {resolutions.front()};
     std::vector<uint32_t> stored;
-    for (uint32_t resolution : resolutions)
-        if (!hic10::required_derived_source(resolution)) stored.push_back(resolution);
+    for (uint32_t resolution : resolutions) {
+        const uint32_t source = hic10::default_derived_source(resolution);
+        const bool default_can_derive = source &&
+            std::binary_search(resolutions.begin(), resolutions.end(), source);
+        const bool forced = std::find(materialized.begin(), materialized.end(), resolution) !=
+                            materialized.end();
+        if (!default_can_derive || forced) stored.push_back(resolution);
+    }
     return stored;
 }
 
@@ -77,10 +84,13 @@ std::vector<uint32_t> checked_resolutions(const StageManifest &stage,
     for (uint32_t resolution : resolutions)
         require(resolution && resolution % stage.source_resolution == 0,
                 "build resolution must be a multiple of HBS resolution");
-    for (uint32_t resolution : resolutions)
-        if (uint32_t source = hic10::required_derived_source(resolution))
-            require(std::binary_search(resolutions.begin(), resolutions.end(), source),
-                    "mandatory derived resolution requires its materialized source");
+    std::set<uint32_t> forced;
+    for (uint32_t resolution : options.materialized) {
+        require(std::binary_search(resolutions.begin(), resolutions.end(), resolution),
+                "materialized override is not in the build resolution list");
+        require(forced.insert(resolution).second,
+                "duplicate materialized resolution override");
+    }
     return resolutions;
 }
 
@@ -201,7 +211,8 @@ void write_pair_manifest(const std::string &path, uint64_t fingerprint,
 
 std::vector<RunInfo> read_pair_manifest(const std::string &path, uint64_t fingerprint,
                                         const std::vector<uint32_t> &resolutions,
-                                        bool root_only) {
+                                        bool root_only,
+                                        const std::vector<uint32_t> &materialized) {
     std::ifstream in(path, std::ios::binary);
     require(bool(in), "missing pair task result " + path);
     std::string magic, tag, hash;
@@ -240,9 +251,9 @@ std::vector<RunInfo> read_pair_manifest(const std::string &path, uint64_t finger
         result.push_back(std::move(run));
         in >> tag;
     }
-    const size_t wanted = stored_resolutions(resolutions, root_only).size();
+    const size_t wanted = stored_resolutions(resolutions, root_only, materialized).size();
     require(tag == "end" && result.size() == wanted, "truncated pair manifest");
-    const auto expected = stored_resolutions(resolutions, root_only);
+    const auto expected = stored_resolutions(resolutions, root_only, materialized);
     for (size_t i = 0; i < expected.size(); ++i)
         require(result[i].resolution == expected[i],
                 "pair manifest has an unexpected cell resolution");
@@ -393,7 +404,7 @@ void build_pair_cells(const std::string &stage_path, const std::string &director
     std::string result_path = pair_manifest_path(directory, pair.chr1, pair.chr2);
     if (path_exists(result_path)) {
         read_pair_manifest(result_path, stage.source_fingerprint, resolutions,
-                           options.root_only);
+                           options.root_only, options.materialized);
         cleanup_pair_inputs(stage, directory, pair_index, options);
         std::cerr << "Pair task " << pair_index << " already complete\n";
         return;
@@ -403,7 +414,8 @@ void build_pair_cells(const std::string &stage_path, const std::string &director
     std::vector<uint32_t> completed;
     std::cerr << "Building cells for " << stage.chromosomes[pair.chr1].name << " x "
               << stage.chromosomes[pair.chr2].name << " (" << pair.records << " records)\n";
-    for (uint32_t resolution : stored_resolutions(resolutions, options.root_only)) {
+    for (uint32_t resolution : stored_resolutions(resolutions, options.root_only,
+                                                  options.materialized)) {
         std::string resolution_prefix = prefix + "-r" + std::to_string(resolution);
         RunInfo merged;
         if (resolution == resolutions.front()) {
@@ -455,7 +467,7 @@ void finalize_build(const std::string &stage_path, const std::string &directory,
     for (const PairInfo &pair : stage.pairs) {
         auto cells = read_pair_manifest(pair_manifest_path(directory, pair.chr1, pair.chr2),
                                         stage.source_fingerprint, resolutions,
-                                        options.root_only);
+                                        options.root_only, options.materialized);
         for (const RunInfo &run : cells)
             out << "cell " << run.chr1 << ' ' << run.chr2 << ' ' << run.resolution << ' '
                 << run.records << ' ' << hex64(run.checksum) << ' ' << std::quoted(run.path) << "\n";
@@ -582,7 +594,7 @@ CellMaterialization materialize_cell(const BuildManifest &build, uint32_t chr1,
     auto direct = build.cells.find(std::make_tuple(chr1, chr2, resolution));
     if (direct != build.cells.end()) return CellMaterialization(direct->second, {});
     const uint32_t source_resolution = build.root_only ? build.resolutions.front()
-        : hic10::required_derived_source(resolution);
+        : hic10::default_derived_source(resolution);
     require(source_resolution, "build manifest is missing a matrix resolution");
     auto root = build.cells.find(std::make_tuple(chr1, chr2, source_resolution));
     require(root != build.cells.end(), "build is missing the derived source cell stream");

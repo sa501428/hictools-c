@@ -136,6 +136,25 @@ def main():
         assert fine.res[0][2][1:] == (1, 1, 0, 0)
         assert fine.records(0, 0, 5) == [(0, 0, 3), (1, 1, (1 << 53) + 8)]
 
+        # Storage-policy overrides must affect both retained out-of-core cell
+        # streams and the final header. Here 2 bp is materialized instead of
+        # using its default 1 bp source, and 4 bp is derived from that new anchor.
+        custom_build = root / "custom-build"
+        run([executable, "build-cells", "-r", "1,2,4", "--materialize", "2",
+             "--memory", "1MiB", stage / "stage.manifest", custom_build])
+        custom_cells = list((custom_build / "cells").glob("*-cells.h10r"))
+        assert len(custom_cells) == 9
+        assert any("-r2-" in cell.name for cell in custom_cells)
+        custom_output = root / "custom.hic"
+        run([executable, "write", "--genome", "tiny", "--memory", "1MiB",
+             "--materialize", "2", "--derive", "4:2",
+             stage / "stage.manifest", custom_build / "build.manifest", custom_output])
+        custom_hic = Hic(custom_output)
+        assert custom_hic.res[0][1][1:] == (0, 1, 0, 0xffffffff)
+        assert custom_hic.res[0][2][1:] == (1, 1, 0, 1)
+        assert custom_hic.records(0, 0, 2) == expected_r2
+        assert custom_hic.records(0, 0, 4) == hic.records(0, 0, 4)
+
         # Matrix assembly can be distributed one chromosome pair per job and
         # merged without decoding or recompressing block payloads.
         pair_parts = root / "pair-parts"

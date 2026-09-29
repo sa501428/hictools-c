@@ -28,7 +28,11 @@ This adds `hic_v10_large` alongside, rather than in place of, `hic_v10`.
 
 Use the same resolution list for every build task. The finest value must equal
 the resolution embedded in HBS, and every other value must be an integer
-multiple of it.
+multiple of it. If a resolution from the standard derived set must be retained
+as a cell stream for materialized output, pass the same repeatable
+`--materialize RESOLUTION` option to every build task and to `write` or each
+`write-pair` task. `--derive TARGET:SOURCE` on the writer overrides a default
+source or adds another derived target.
 
 ### 1. Validate, index, and shard the single gzip stream
 
@@ -248,8 +252,8 @@ temporary-file traffic. Larger blocks use the bounded streaming encoder and a
 temporary encoded-block sidecar, so an unusually dense block cannot exhaust
 RAM. The cache/raw/compressed buffers are bounded per compression worker. A
 block whose raw or compressed payload exceeds V10's own `u32` length fields
-fails explicitly. Mandatory V10 derived-resolution declarations are applied,
-while derived cells are rolled up from their required materialized sources when
+fails explicitly. The standard V10 derived-resolution defaults are applied
+unless overridden, while derived cells are rolled up from materialized sources when
 computing norms and expected vectors.
 
 Use `hic_v10_large validate-v10 output.hic` for a streaming structural check.

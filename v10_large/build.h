@@ -11,6 +11,7 @@ namespace hic10large {
 
 struct BuildOptions {
     std::vector<uint32_t> resolutions;
+    std::vector<uint32_t> materialized;
     uint64_t memory_bytes = 8ULL * 1024 * 1024 * 1024;
     size_t merge_fan_in = 128;
     bool root_only = false;

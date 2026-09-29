@@ -20,6 +20,7 @@ struct WriteOptions {
     size_t resolution_batch = 4;
     size_t pair_index = std::numeric_limits<size_t>::max();
     std::vector<std::pair<uint32_t, uint32_t>> derived;
+    std::vector<uint32_t> materialized;
 };
 
 void write_v10(const std::string &stage_manifest, const std::string &build_manifest,

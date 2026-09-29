@@ -273,13 +273,23 @@ Writer::Writer(const std::string &output, Header header, const Options &options,
             check(list[i].bin > 0 && (!i || list[i].bin > list[i - 1].bin),
                   "invalid resolution list");
     }
+    std::set<uint32_t> explicitDerived, explicitMaterialized;
+    for (uint32_t bin : options_.materialized) {
+        header_.resolution(0, bin);
+        check(explicitMaterialized.insert(bin).second,
+              "duplicate materialized resolution override");
+    }
+    for (const auto &d : options_.derived) {
+        check(explicitDerived.insert(d.first).second,
+              "duplicate derived resolution override");
+        check(!explicitMaterialized.count(d.first),
+              "resolution cannot be both derived and materialized");
+    }
     auto derive = [&](std::pair<uint32_t, uint32_t> d) {
         auto target = header_.resolution(0, d.first), source = header_.resolution(0, d.second);
         check(d.first > d.second && d.first % d.second == 0,
               "derived target must be an integer multiple of finer source");
         auto &r = header_.resolutions[0][target];
-        check(!required_materialized_resolution(r.bin),
-              "500 kb is required to remain materialized");
         if (r.mode) {
             check(r.source == source, "conflicting derived target sources");
             return;
@@ -290,20 +300,17 @@ Writer::Writer(const std::string &output, Header header, const Options &options,
     };
     for (auto d : options_.derived)
         derive(d);
-    // These fine-resolution pyramid levels are virtual in every conforming V10
-    // file. Applying the policy in the writer makes -r describe queryable
-    // resolutions without requiring a fragile list of CLI flags.
+    // Apply the standard pyramid only when the user did not override the
+    // target. This preserves the established default while allowing custom
+    // anchors and source mappings.
     for (const auto &r : header_.resolutions[0]) {
-        if (uint32_t source = required_derived_source(r.bin))
+        if (uint32_t source = default_derived_source(r.bin);
+            source && !explicitDerived.count(r.bin) && !explicitMaterialized.count(r.bin))
             derive({r.bin, source});
-        if (required_materialized_resolution(r.bin))
-            check(!r.mode, "500 kb is required to remain materialized");
     }
     for (const auto &r : header_.resolutions[0])
         if (r.mode)
             check(!header_.resolutions[0][r.source].mode, "chained derivation is forbidden");
-    check(required_bp_resolution_policy(header_.resolutions[0]),
-          "mandatory BP derivation policy is not satisfied");
     std::set<std::string> names;
     for (uint32_t i = 0; i < header_.chromosomes.size(); ++i) {
         const auto &c = header_.chromosomes[i];

@@ -16,8 +16,10 @@ static void usage() {
            "\nPre/convert writer options:\n"
            "  -t N               Pair/block writer workers (default 4)\n"
            "  --block-bins N     Additional minimum logical block width (max 4096)\n"
-           "  --derive T:S       Add a nonstandard derived BP resolution; repeatable\n"
-           "                     2/5/20/50/200/500/2000 BP are always derived; 500 kb is stored\n"
+           "  --derive T:S       Derive a BP target from a materialized source; repeatable\n"
+           "                     Overrides the standard source for that target\n"
+           "  --materialize N    Store a BP resolution that is derived by default; repeatable\n"
+           "                     Defaults: 2/5<-1, 20/50<-10, 200/500<-100, 2000<-1000\n"
            "  --scores           Force SCORE_FLOAT32, even for integral values\n"
            "  -T DIR             Run-scoped spool parent; automatically cleaned (default /tmp)\n"
            "  --read-ahead N     Maximum outstanding chromosome pairs (default: -t)\n\n"
@@ -100,6 +102,8 @@ int main(int argc, char **argv) {
                 auto colon = s.find(':');
                 hic10::check(colon != std::string::npos, "--derive needs target:source");
                 opts.derived.emplace_back(number(s.substr(0, colon)), number(s.substr(colon + 1)));
+            } else if (command != "addnorm" && arg == "--materialize") {
+                opts.materialized.push_back(number(value()));
             } else if (command != "addnorm" && arg == "-T") {
                 auto directory = value();
                 if (command == "pre")

@@ -21,7 +21,7 @@ void usage() {
            "  hic_v10_large stage [--chunk-records N] [--progress-records N]\n"
            "      <input.hbs.gz> <work-dir>\n"
            "  hic_v10_large inspect [--verify] <work-dir/stage.manifest>\n\n"
-           "  hic_v10_large build-cells -r N,N,... [--root-only] [--memory SIZE] [--fan-in N]\n"
+           "  hic_v10_large build-cells -r N,N,... [--materialize N] [--root-only] [--memory SIZE] [--fan-in N]\n"
            "      <stage.manifest> <build-dir>\n\n"
            "  hic_v10_large plan -r N,N,... [--root-only] [--fan-in N] <stage.manifest> <build-dir>\n"
            "  hic_v10_large map-root -r N,N,... [--memory SIZE] [--fan-in N] <stage.manifest> <build-dir> <shard-id>\n"
@@ -32,10 +32,10 @@ void usage() {
            "      <stage.manifest> <build-dir>\n\n"
            "  hic_v10_large write [--genome NAME] [--memory SIZE] [--tmp DIR] [-t N] [--fan-in N]\n"
            "      [--vectors vectors.manifest] [--pair PAIR_ID] [--resolution-batch N]\n"
-           "      [--derive TARGET:SOURCE] <stage.manifest> <build.manifest> <output.hic>\n\n"
+           "      [--derive TARGET:SOURCE] [--materialize N] <stage.manifest> <build.manifest> <output.hic>\n\n"
            "  hic_v10_large plan-write <stage.manifest> <build.manifest> <parts-dir> <output.hic>\n"
            "  hic_v10_large write-pair [--genome NAME] [--memory SIZE] [--tmp DIR] [-t N]\n"
-           "      [--fan-in N] [--resolution-batch N] [--derive TARGET:SOURCE]\n"
+           "      [--fan-in N] [--resolution-batch N] [--derive TARGET:SOURCE] [--materialize N]\n"
            "      <stage.manifest> <build.manifest>\n"
            "      <parts-dir> <pair-id>\n"
            "  hic_v10_large merge-pairs [--vectors vectors.manifest] [-t N] [--level N]\n"
@@ -55,7 +55,8 @@ void usage() {
            "  hic_v10_large validate-v10 [--matrix CHR1:CHR2:BIN] <file.v10.hic>\n\n"
            "The large-data builder is separate from hic_v10 pre. Stage validates the\n"
            "entire gzip/HBS stream, checks chromosome-pair contiguity, and writes\n"
-           "record-aligned shards plus a durable manifest.\n";
+           "record-aligned shards plus a durable manifest. Pass --materialize N to\n"
+           "every build task and writer task when overriding a default-derived level.\n";
 }
 
 uint64_t number(const std::string &text) {
@@ -165,6 +166,10 @@ int main(int argc, char **argv) {
                     options.merge_fan_in = static_cast<size_t>(number(argv[++i]));
                 } else if (arg == "--root-only") {
                     options.root_only = true;
+                } else if (arg == "--materialize") {
+                    require(i + 1 < argc, "missing value for --materialize");
+                    options.materialized.push_back(
+                        number32(argv[++i], "materialized resolution"));
                 } else {
                     require(arg.empty() || arg[0] != '-', "unknown option " + arg);
                     args.push_back(arg);
@@ -219,6 +224,9 @@ int main(int argc, char **argv) {
                     options.resolution_batch = static_cast<size_t>(number(value()));
                 else if (arg == "--pair") options.pair_index = static_cast<size_t>(number(value()));
                 else if (arg == "--derive") options.derived.push_back(derivation(value()));
+                else if (arg == "--materialize")
+                    options.materialized.push_back(
+                        number32(value(), "materialized resolution"));
                 else {
                     require(arg.empty() || arg[0] != '-', "unknown option " + arg);
                     args.push_back(arg);

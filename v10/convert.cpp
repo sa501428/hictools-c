@@ -709,6 +709,8 @@ void convert(const std::string &input, const std::string &output, const Options 
                            std::to_string(options.verifyDerived);
     for (auto d : options.derived)
         identity += "\x1f" + std::to_string(d.first) + ":" + std::to_string(d.second);
+    for (auto r : options.materialized)
+        identity += "\x1fmaterialized:" + std::to_string(r);
     const std::string runKey = hex64(fnv1a(identity));
     Options writerOptions = options;
     writerOptions.stagingPath = output + ".v10-partial-" + runKey;

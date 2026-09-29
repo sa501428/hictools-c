@@ -162,7 +162,10 @@ struct Resolution {
     uint8_t mode = 0, aggregation = 1;
     uint32_t source = UINT32_MAX;
 };
-inline uint32_t required_derived_source(uint32_t bin) {
+// Standard writer policy. These are defaults, not wire-format constraints:
+// callers may explicitly materialize a target or derive it from another exact
+// materialized divisor.
+inline uint32_t default_derived_source(uint32_t bin) {
     switch (bin) {
     case 2:
     case 5:
@@ -178,24 +181,6 @@ inline uint32_t required_derived_source(uint32_t bin) {
     default:
         return 0;
     }
-}
-inline bool required_materialized_resolution(uint32_t bin) {
-    return bin == 500000;
-}
-inline bool required_bp_resolution_policy(const std::vector<Resolution> &list) {
-    for (uint32_t i = 0; i < list.size(); ++i) {
-        const auto &r = list[i];
-        if (uint32_t source_bin = required_derived_source(r.bin)) {
-            auto source = std::find_if(list.begin(), list.end(),
-                                       [&](const Resolution &s) { return s.bin == source_bin; });
-            if (source == list.end() || !r.mode || r.source != uint32_t(source - list.begin()) ||
-                source->mode)
-                return false;
-        }
-        if (required_materialized_resolution(r.bin) && r.mode)
-            return false;
-    }
-    return true;
 }
 struct Header {
     std::string genome;
@@ -244,6 +229,7 @@ struct Options {
     uint32_t blockBins = 256;
     std::string tmpDir = "/tmp";
     std::vector<std::pair<uint32_t, uint32_t>> derived;
+    std::vector<uint32_t> materialized;
     bool scores = false, verifyDerived = true;
     // Resumable staging. When stagingPath is set the writer builds the output at
     // that fixed path beside the destination and journals every chromosome pair
