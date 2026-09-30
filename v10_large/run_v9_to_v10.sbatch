@@ -113,8 +113,8 @@ submit() {
 
 task_count() { awk -F '\t' -v type="$2" '$1 == type {n++} END {print n+0}' "$1"; }
 task_row() {
-    awk -F '\t' -v type="$2" -v index="$SLURM_ARRAY_TASK_ID" \
-        '$1 == type && n++ == index {print $2; found=1; exit} END {if (!found) exit 1}' "$1"
+    awk -F '\t' -v type="$2" -v idx="$SLURM_ARRAY_TASK_ID" \
+        '$1 == type && n++ == idx {print $2; found=1; exit} END {if (!found) exit 1}' "$1"
 }
 scratch_dir() {
     local path="$TMP_DIR/${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID:-0}-$1"
