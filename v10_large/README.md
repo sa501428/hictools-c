@@ -26,6 +26,42 @@ This adds `hic_v10_large` alongside, rather than in place of, `hic_v10`.
 
 ## Pipeline
 
+### Slurm: V9 input to a validated V10 file
+
+[`run_v9_to_v10.sbatch`](run_v9_to_v10.sbatch) submits the dump, staging,
+build, normalization, write, validation, and comparison jobs in dependency
+order. All input, output, work, scratch, source, and binary paths are supplied
+at submission time. For example:
+
+```sh
+sbatch v10_large/run_v9_to_v10.sbatch \
+  --input /path/to/input.v9.hic \
+  --work-dir /path/to/shared/work \
+  --tmp-dir /path/to/shared/scratch \
+  --output /path/to/output.v10.hic \
+  --hictools-repo /path/to/hictools-c \
+  --straw-repo /path/to/straw \
+  --genome hg38
+```
+
+Pass `--hic-bin` and `--straw-bin` instead of the corresponding repository
+options to use prebuilt executables. With repository options, the setup job
+builds both tools inside the work directory. The work and scratch directories
+must be accessible from every node, and the work directory needs enough space
+for the HBS dump, staged shards, cell streams, vector sidecars, and pair
+fragments. The setup job's log uses Slurm's default output location; all later
+jobs log to `WORK_DIR/logs`. The script keeps its submitted version in the work
+directory so that child jobs run the same code. Published task artifacts can be
+reused after a failed array task; an interrupted dump or staging pass starts
+again. If a dependency chain stops, inspect the failed job or held array tasks
+with `squeue` and `sacct`.
+
+The final validation is structural. The two `straw compare` passes write their
+results to the comparison job log; numerical differences can be expected for
+normalization vectors, so review the cell comparison there.
+
+### Manual pipeline
+
 Use the same resolution list for every build task. The finest value must equal
 the resolution embedded in HBS, and every other value must be an integer
 multiple of it. If a resolution from the standard derived set must be retained
