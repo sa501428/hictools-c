@@ -15,10 +15,21 @@ Usage: sbatch run_v9_to_v10.sbatch --input INPUT.v9.hic --work-dir WORK_DIR
        (--hictools-repo REPO | --hic-bin EXECUTABLE)
        (--straw-repo REPO | --straw-bin EXECUTABLE)
        [--output OUTPUT.v10.hic] [--tmp-dir SCRATCH_DIR] [--genome NAME]
+       [--time-short LIMIT] [--time-medium LIMIT] [--time-long LIMIT]
+       [--time-extra-long LIMIT] [--time-build LIMIT] [--time-finalize LIMIT]
 
 WORK_DIR and SCRATCH_DIR must be visible to all nodes. The output defaults to
 WORK_DIR/INPUT.v10.hic; scratch defaults to WORK_DIR/scratch. Supply source
 repositories to build the tools in WORK_DIR/tools, or supply existing binaries.
+
+Optional child-job time limits (Slurm format, e.g. 12:00:00 or 3-00:00:00):
+  --time-short       Dispatchers                         [04:00:00]
+  --time-medium      Map, reduce, structural validation  [1-00:00:00]
+  --time-long        Dump, stage, expected, write, compare [3-00:00:00]
+  --time-extra-long  Chromosome normalization, merge     [5-00:00:00]
+  --time-build       Pair cell construction              [2-00:00:00]
+  --time-finalize    Build/vector finalization           [08:00:00]
+Set the initial setup job's limit with sbatch --time=LIMIT before the script name.
 EOF
 }
 
@@ -40,16 +51,22 @@ PHASE=${PHASE:-setup}
 if [[ $PHASE == setup ]]; then
     INPUT= WORK_DIR= OUTPUT= TMP_DIR= GENOME=hg38
     HICTOOLS_REPO= STRAW_REPO= HIC_BIN= STRAW_BIN=
+    TIME_SHORT=04:00:00 TIME_MEDIUM=1-00:00:00 TIME_LONG=3-00:00:00
+    TIME_EXTRA_LONG=5-00:00:00 TIME_BUILD=2-00:00:00 TIME_FINALIZE=08:00:00
     while (($#)); do
         case $1 in
-            --input|--work-dir|--output|--tmp-dir|--genome|--hictools-repo|--straw-repo|--hic-bin|--straw-bin)
+            --input|--work-dir|--output|--tmp-dir|--genome|--hictools-repo|--straw-repo|--hic-bin|--straw-bin|--time-short|--time-medium|--time-long|--time-extra-long|--time-build|--time-finalize)
                 (($# >= 2)) || fail "missing value for $1"
+                [[ -n $2 ]] || fail "empty value for $1"
                 case $1 in
                     --input) INPUT=$2 ;; --work-dir) WORK_DIR=$2 ;;
                     --output) OUTPUT=$2 ;; --tmp-dir) TMP_DIR=$2 ;;
                     --genome) GENOME=$2 ;; --hictools-repo) HICTOOLS_REPO=$2 ;;
                     --straw-repo) STRAW_REPO=$2 ;; --hic-bin) HIC_BIN=$2 ;;
                     --straw-bin) STRAW_BIN=$2 ;;
+                    --time-short) TIME_SHORT=$2 ;; --time-medium) TIME_MEDIUM=$2 ;;
+                    --time-long) TIME_LONG=$2 ;; --time-extra-long) TIME_EXTRA_LONG=$2 ;;
+                    --time-build) TIME_BUILD=$2 ;; --time-finalize) TIME_FINALIZE=$2 ;;
                 esac
                 shift 2 ;;
             -h|--help) usage; exit 0 ;;
@@ -89,6 +106,7 @@ if [[ $PHASE == setup ]]; then
         STRAW_BIN=$(absolute "$STRAW_BIN")
     fi
     export INPUT WORK_DIR OUTPUT TMP_DIR GENOME HICTOOLS_REPO STRAW_REPO HIC_BIN STRAW_BIN RUN
+    export TIME_SHORT TIME_MEDIUM TIME_LONG TIME_EXTRA_LONG TIME_BUILD TIME_FINALIZE
 fi
 
 [[ -n ${SLURM_JOB_ID:-} ]] || fail "run this script with sbatch"
@@ -104,7 +122,18 @@ SELF="$WORK_DIR/run_v9_to_v10.sbatch"
 submit() {
     local phase=$1 name=$2 dependency=$3
     shift 3
+    local time_limit
+    case $phase in
+        dispatch_normalize|dispatch_write) time_limit=$TIME_SHORT ;;
+        map_root|reduce_root|validate) time_limit=$TIME_MEDIUM ;;
+        dump|stage|expected_res|write_pair|compare) time_limit=$TIME_LONG ;;
+        normalize_chr|merge) time_limit=$TIME_EXTRA_LONG ;;
+        build_pair) time_limit=$TIME_BUILD ;;
+        finalize_build|finalize_vectors) time_limit=$TIME_FINALIZE ;;
+        *) fail "no time category for phase: $phase" ;;
+    esac
     local args=(--parsable --job-name="$name" --partition="$PARTS"
+                --time="$time_limit"
                 --output="$LOGS/%x_%A_%a.out" --error="$LOGS/%x_%A_%a.err"
                 --export=ALL,PHASE="$phase")
     [[ -z $dependency ]] || args+=(--dependency="$dependency")
@@ -144,7 +173,7 @@ case $PHASE in
         echo "output: $OUTPUT"
         echo "work: $WORK_DIR"
         echo "scratch: $TMP_DIR"
-        submit dump v9to10_dump '' --cpus-per-task=2 --mem=48G --time=3-00:00:00
+        submit dump v9to10_dump '' --cpus-per-task=2 --mem=48G
         ;;
     dump)
         if [[ ! -s $HBS ]]; then
@@ -156,7 +185,7 @@ case $PHASE in
             trap - EXIT
         fi
         ls -lh "$HBS"
-        submit stage v9to10_stage '' --cpus-per-task=4 --mem=32G --time=3-00:00:00
+        submit stage v9to10_stage '' --cpus-per-task=4 --mem=32G
         ;;
     stage)
         /usr/bin/time -v "$HIC_BIN" stage --chunk-records "$CHUNK_RECORDS" \
@@ -168,20 +197,20 @@ case $PHASE in
         n_reduce=$(task_count "$WORK_DIR/build.tasks.tsv" reduce-root)
         n_pair=$(task_count "$WORK_DIR/build.tasks.tsv" build-pair)
         ((n_map > 0 && n_pair > 0)) || fail "empty build plan"
-        jid=$(submit map_root v9to10_maproot '' --cpus-per-task=4 --mem=24G --time=1-00:00:00 \
+        jid=$(submit map_root v9to10_maproot '' --cpus-per-task=4 --mem=24G \
             --array="0-$((n_map - 1))%$THROTTLE_MAP")
         if ((n_reduce > 0)); then
             jid=$(submit reduce_root v9to10_reduceroot "afterok:$jid" \
-                --cpus-per-task=4 --mem=24G --time=1-00:00:00 \
+                --cpus-per-task=4 --mem=24G \
                 --array="0-$((n_reduce - 1))%$THROTTLE_MAP")
         fi
         jid=$(submit build_pair v9to10_buildpair "afterok:$jid" \
-            --cpus-per-task=4 --mem=24G --time=2-00:00:00 \
+            --cpus-per-task=4 --mem=24G \
             --array="0-$((n_pair - 1))%$THROTTLE_BUILD")
         jid=$(submit finalize_build v9to10_finbuild "afterok:$jid" \
-            --cpus-per-task=2 --mem=16G --time=08:00:00)
+            --cpus-per-task=2 --mem=16G)
         submit dispatch_normalize v9to10_dispnorm "afterok:$jid" \
-            --cpus-per-task=2 --mem=8G --time=04:00:00
+            --cpus-per-task=2 --mem=8G
         ;;
     map_root)
         id=$(task_row "$WORK_DIR/build.tasks.tsv" map-root)
@@ -208,15 +237,15 @@ case $PHASE in
         n_chr=$(task_count "$WORK_DIR/vectors.tasks.tsv" normalize-chr)
         n_res=$(task_count "$WORK_DIR/vectors.tasks.tsv" expected-res)
         ((n_chr > 0 && n_res > 0)) || fail "empty normalization plan"
-        jid=$(submit normalize_chr v9to10_normchr '' --cpus-per-task=16 --mem=150G --time=5-00:00:00 \
+        jid=$(submit normalize_chr v9to10_normchr '' --cpus-per-task=16 --mem=150G \
             --array="0-$((n_chr - 1))%$THROTTLE_NORM")
         jid=$(submit expected_res v9to10_expected "afterok:$jid" \
-            --cpus-per-task=16 --mem=120G --time=3-00:00:00 \
+            --cpus-per-task=16 --mem=120G \
             --array="0-$((n_res - 1))%$THROTTLE_EXPECTED")
         jid=$(submit finalize_vectors v9to10_finvec "afterok:$jid" \
-            --cpus-per-task=2 --mem=16G --time=08:00:00)
+            --cpus-per-task=2 --mem=16G)
         submit dispatch_write v9to10_dispwrite "afterok:$jid" \
-            --cpus-per-task=2 --mem=8G --time=04:00:00
+            --cpus-per-task=2 --mem=8G
         ;;
     normalize_chr|expected_res)
         if [[ $PHASE == normalize_chr ]]; then
@@ -241,13 +270,13 @@ case $PHASE in
             "$PARTS_DIR" "$OUTPUT" > "$WORK_DIR/pair-parts.tasks.tsv"
         n_pair=$(task_count "$WORK_DIR/pair-parts.tasks.tsv" write-pair)
         ((n_pair > 0)) || fail "empty write plan"
-        jid=$(submit write_pair v9to10_writepair '' --cpus-per-task=16 --mem=32G --time=3-00:00:00 \
+        jid=$(submit write_pair v9to10_writepair '' --cpus-per-task=16 --mem=32G \
             --array="0-$((n_pair - 1))%$THROTTLE_WRITE")
-        jid=$(submit merge v9to10_merge "afterok:$jid" --cpus-per-task=16 --mem=64G --time=5-00:00:00)
+        jid=$(submit merge v9to10_merge "afterok:$jid" --cpus-per-task=16 --mem=64G)
         jid=$(submit validate v9to10_validate "afterok:$jid" \
-            --cpus-per-task=8 --mem=64G --time=1-00:00:00)
+            --cpus-per-task=8 --mem=64G)
         submit compare v9to10_compare "afterok:$jid" \
-            --cpus-per-task=8 --mem=150G --time=3-00:00:00
+            --cpus-per-task=8 --mem=150G
         ;;
     write_pair)
         id=$(task_row "$WORK_DIR/pair-parts.tasks.tsv" write-pair)

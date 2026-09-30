@@ -44,6 +44,25 @@ sbatch v10_large/run_v9_to_v10.sbatch \
   --genome hg38
 ```
 
+Optional time limits apply to each task in the indicated category and are
+exported to every child job. Omitted options retain these defaults:
+
+| Option | Phases | Default |
+| --- | --- | --- |
+| `--time-short` | Dispatchers | `04:00:00` |
+| `--time-medium` | Map, reduce, structural validation | `1-00:00:00` |
+| `--time-long` | Dump, stage, expected values, pair writing, comparison | `3-00:00:00` |
+| `--time-extra-long` | Chromosome normalization, final merge | `5-00:00:00` |
+| `--time-build` | Pair cell construction | `2-00:00:00` |
+| `--time-finalize` | Build and vector finalization | `08:00:00` |
+
+For example, append `--time-medium 2-00:00:00 --time-long 5-00:00:00
+--time-extra-long 7-00:00:00` to the command above. Values use Slurm time syntax
+and are validated by `sbatch`. To change the initial setup job's limit, put
+`--time=08:00:00` before the script name: `sbatch --time=08:00:00
+v10_large/run_v9_to_v10.sbatch ...`. Script arguments can only affect jobs
+submitted after setup starts.
+
 Pass `--hic-bin` and `--straw-bin` instead of the corresponding repository
 options to use prebuilt executables. With repository options, the setup job
 builds both tools inside the work directory. The work and scratch directories
