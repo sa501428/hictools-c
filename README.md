@@ -18,7 +18,14 @@ build/hic_v10 addnorm -t 8 output.v10.hic
 ```
 
 `hic_v10 addnorm` computes VC, VC_SQRT, and SCALE at both materialized and
-derived resolutions and writes raw and normalized expected vectors. See the
+derived resolutions and adds missing raw and normalized expected vectors while
+preserving existing normalizations exactly. Select types with `--norm VC`,
+`--norm VC_SQRT`, or `--norm SCALE` (comma-separated lists also work).
+`hic_v10_large addnorm` normalizes a completed BP count file using disk-backed
+cell runs, without its original build folder. Both tools accept `--vectors` to
+import sidecars for additional normalization types. `--norm-file vectors.txt`
+accepts user-supplied divisors in the documented text format and calculates their
+normalized expected values automatically. See the
 [V10 documentation](v10/README.md) for details, memory behavior, and legacy
 vector length migration. By default V10 derives 2, 5, 20, 50, 200, 500, and 2,000 bp
 from the standard finer anchors and materializes 500 kb. `--derive` and

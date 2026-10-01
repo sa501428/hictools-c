@@ -1,5 +1,5 @@
 #pragma once
-// Local, full-matrix V10 reader used by hic_v10 addnorm. This is intentionally
+// Local V10 reader with full-matrix and block-streaming interfaces. Intentionally
 // separate from both straw and the V9 hic_addnorm reader.
 #include "format.h"
 #include <array>
@@ -17,6 +17,14 @@ struct MatrixKey {
     bool operator<(const MatrixKey &o) const {
         return std::tie(chr1, chr2) < std::tie(o.chr1, o.chr2);
     }
+};
+
+struct VectorEntry {
+    uint8_t kind = 0, unit = 0;
+    uint32_t norm = 0, chr = 0, ri = 0;
+    Bytes bytes;
+    size_t descriptors = 0;
+    uint32_t chunks = 0;
 };
 
 class Reader {
@@ -41,8 +49,12 @@ class Reader {
     uint64_t vector_data_start();
 
     // Absolute u64 fields inside the matrix section that point elsewhere in
-    // that section. A header repacker shifts these fields by the header delta.
-    std::vector<uint64_t> matrix_relocation_fields();
+    // that section. Optionally returns the referenced matrix storage intervals.
+    std::vector<uint64_t> matrix_relocation_fields(std::vector<FileLocator> *storage = nullptr);
+    std::vector<VectorEntry> vector_entries();
+    // Decode one materialized block at a time, without retaining a full matrix.
+    void stream_materialized(uint32_t chr1, uint32_t chr2, uint8_t unit, uint32_t ri,
+                             const std::function<void(const Cell &)> &emit);
 
     // Returns canonical cells (x <= y for cis). Derived resolutions are summed
     // exactly from their declared materialized source before conversion to float.
@@ -71,6 +83,7 @@ class Reader {
     std::vector<MatrixKey> matrix_keys_;
 
     const MatrixMeta &metadata(MatrixKey key);
-    Matrix materialized(MatrixKey key, const Zoom &zoom);
+    Matrix materialized(MatrixKey key, const Zoom &zoom,
+                        const std::function<void(const Cell &)> &emit = {});
 };
 } // namespace hic10

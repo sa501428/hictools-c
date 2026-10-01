@@ -92,27 +92,167 @@ completed V10 file with the separate V10 implementation:
 build/hic_v10 addnorm -t 8 output.v10.hic
 ```
 
-`hic_v10 addnorm` computes VC, VC_SQRT, and SCALE for every advertised BP and
-FRAG resolution. For a materialized resolution it reads that resolution's
-independent blocks; for a derived resolution it deterministically aggregates its declared
-source in memory and normalizes the resulting cells. Raw expected (`EVI0`) is
-rebuilt for every resolution, and each enabled normalization gets a normalized
-expected (`NEVI`) vector with chromosome scale factors.
-
-The command uses the same normalization controls as the V9 tool:
+`hic_v10 addnorm` adds VC, VC_SQRT, and SCALE at advertised BP and FRAG
+resolutions, including derived resolutions. Select one or more types explicitly:
 
 ```sh
-build/hic_v10 addnorm --no-scale output.v10.hic
-build/hic_v10 addnorm -t 8 --tol 1e-4 --iter 2000 --min-res 25000 output.v10.hic
+build/hic_v10 addnorm --norm VC output.v10.hic
+build/hic_v10 addnorm --norm VC_SQRT,SCALE -t 8 output.v10.hic
+build/hic_v10 add-norm --norm SCALE --min-res 25000 output.v10.hic
 ```
 
-The update is atomic and in place: matrix bytes are copied unchanged, a fresh
-vector section is written, and the temporary file replaces the input only after
-it is flushed. Repeated runs replace the prior vector section without growing
-the file. `pre` leaves the normalization dictionary empty and the fixed NVI
-locator `(0, 0)`. When `addnorm` runs, it adds only the requested normalization
-names, expands the variable header, relocates the unchanged matrix section, and
-fills the NVI locator. This repack is staged in the same atomic temporary file.
+`add-norm` is an alias for `addnorm`. Without `--norm`, all three algorithms are
+selected. The existing `--no-vc`, `--no-vc-sqrt`, `--no-scale`, `--tol`, `--iter`,
+`--min-res`, and `--level` controls remain available. A `--no-*` option disables
+computation for that type; it never removes existing vectors.
+
+**Existing normalizations are retained exactly**, including types the program
+does not know how to compute. Dictionary IDs stay stable and new names are
+appended. An existing type/unit/resolution bundle (any normalization or normalized
+expected entry at that resolution) is retained as a whole, rather than recomputed
+or combined with newly computed vectors. This also preserves bundles available
+for only some chromosomes. Raw expected (`EVI0`) entries stay exact; missing raw
+expected entries are computed. Each new computed normalization gets its own
+normalized expected (`NEVI`) entry and chromosome scale factors.
+
+For materialized resolutions, the regular normalizer reads one chromosome matrix
+at a time. For derived resolutions, it aggregates the declared source before
+normalizing the target. For large BP count files, use the disk-backed
+[`hic_v10_large addnorm`](../v10_large/README.md#add-normalizations-to-a-completed-v10-file)
+command; it needs only the finished `.hic` file.
+
+The update is atomic and in place. It writes a temporary file beside the input,
+copies stored contact blocks and existing vector chunks without recompression,
+updates absolute locators in metadata and indexes, and replaces the input after
+flushing and syncing the completed file. File permission bits and ordered header
+attributes are retained. Growing the dictionary requires expanding the header;
+new vector chunks, NVI/EVI/NEVI directories, and the matrix footer are written with
+valid relocated positions. Interleaved matrix/vector layouts are supported.
+Obsolete directories are omitted, so repeated additions do not accumulate stale
+copies of prior vector sections. A failed update leaves the input untouched.
+Allow disk space for the replacement file as well as any computation workspace.
+
+### Supply normalization vectors as text
+
+Use `--norm-file` when the divisors have already been calculated elsewhere and
+you want the tool to calculate the corresponding normalized expected arrays:
+
+```sh
+build/hic_v10 addnorm --norm-file vectors.txt completed.v10.hic
+build/hic_v10_large addnorm --norm-file vectors.txt --memory 8GiB \
+  --tmp /local/scratch completed.v10.hic
+```
+
+The first non-comment line is `HIC_NORM_VECTORS 1`. Each block specifies a type
+name, the exact chromosome name from the file header, `BP` or `FRAG`, and an
+advertised bin size. Values follow in bin-index order, starting at bin zero,
+with no coordinate column. An `end` line terminates each vector. For example,
+for a chromosome with three bins at 10 kb and two bins at 20 kb:
+
+```text
+HIC_NORM_VECTORS 1
+# Values are divisors: normalized(i,j) = raw(i,j) / (N[i] * N[j]).
+vector MY_NORM chr1 BP 10000
+1.25
+0.90
+nan
+end
+
+vector MY_NORM chr1 BP 20000
+1.10
+0.95
+end
+```
+
+Multiple types, chromosomes, and resolutions can share one text file. One value
+per line is recommended; multiple whitespace-separated values per line are also
+accepted. Blank lines and `#` comments are ignored. Names containing spaces may
+be double-quoted; names containing `#` are not supported in this text format.
+Type names are arbitrary except `NONE`. The synthetic `ALL` overview cannot
+receive a supplied vector. BP vectors require exactly
+`ceil(chromosomeLength / binSize)` values; FRAG vectors require exactly
+`ceil((siteCount + 1) / binSize)` values. Every block must target an advertised
+resolution, including any derived target. Supply a separate target-resolution
+vector; the tool does not derive normalization values from finer vectors.
+
+Values are parsed directly into float32 and stored **without rescaling or
+balancing**. Decimal and scientific notation are supported. Use `nan` or `0`
+for unavailable bins. Nonpositive or nonfinite divisors are stored but excluded
+from expected-value calculations. For exact bits (including signed zero or a
+specific NaN payload), use `bits:XXXXXXXX`, for example `bits:7fc01234`.
+Unrepresentable overflow is an error; text values follow float32 rounding.
+
+For each newly supplied type/unit/resolution bundle, the command calculates a
+full-length NEVI array from the corresponding raw cis contacts divided by the
+supplied divisors, using the existing expected-value smoothing and chromosome
+scale-factor calculation. Only chromosomes supplied for that bundle contribute
+to its normalized expected values. A bundle with no usable normalized contacts
+gets an all-NaN expected array. Existing EVI entries are preserved; missing EVI
+entries at imported resolutions are calculated from all available cis
+chromosomes. Raw contact blocks and all previously stored normalization and
+expected vectors remain exact.
+
+The existing preservation rule also applies to text imports: if any NVI or NEVI
+entry already exists for that type/unit/resolution, the entire supplied bundle
+is skipped with a message. Use a different type name to retain both versions of
+an externally calculated normalization. This command does not replace or fill
+partial existing bundles. Bad lengths, duplicate keys, unknown chromosomes or
+resolutions, invalid values, and missing `end` markers fail without changing
+the `.hic` file. `--norm-file` cannot be combined with `--norm` or `--vectors`.
+
+Input vectors are staged as temporary sidecars, with one chromosome vector and
+one distance accumulator loaded for expected calculation at a time. `--tmp`
+sets the scratch directory (default `/tmp`); workspaces are removed on success
+or ordinary failure. The regular tool supports BP/FRAG count and score matrices.
+The large text importer supports BP/FRAG count matrices, streaming materialized
+blocks and using external sort and exact rollups for derived resolutions. It
+requires no original build manifests. Per-bin arrays and decoded blocks require
+memory beyond the large tool's `--memory` sort-buffer budget. The updated file
+is staged beside the original before atomic replacement.
+
+### Import another normalization algorithm
+
+Both V10 executables can import BP vectors from the large builder's sidecar format:
+
+```sh
+build/hic_v10 addnorm --vectors /path/to/vectors.manifest output.v10.hic
+build/hic_v10_large addnorm --vectors /path/to/vectors.manifest output.v10.hic
+```
+
+This imports a complete sidecar set, including any precomputed expected vectors,
+and cannot be combined with `--norm` or `--norm-file`. Use the text option above
+when you want normalized expected vectors calculated automatically. The manifest may name additional algorithms such as `KR` or a custom
+name. Names map to the destination dictionary by string, so their source IDs
+need not match the file's IDs. The same preservation policy applies. Imports use
+BP bin sizes to resolve destination resolutions, validate vector dimensions and
+chromosome IDs, and verify sidecar checksums while streaming exact float32 words.
+Imported vectors must have been computed for the destination's contacts and
+chromosome order; the sidecar source fingerprint is provenance, not a comparison
+against a V10 file. Supply normalized expected entries too when O/E queries are
+needed.
+
+The sidecar format is `HIC_V10_LARGE_VECTORS 1`, implemented in
+[`vectors.cpp`](../v10_large/vectors.cpp). Its text records are:
+
+```text
+source <16-digit-hex-provenance>
+norms <count> "<type-name>" ...
+vectors <count>
+vector <kind> <norm-id> <chr-id> <resolution-index> <bp-bin-size> <word-count> <checksum-hex> "<sidecar-path>" <scale-count> [<chr-id> <f32-bits-hex>] ...
+end
+```
+
+Kinds are `0` normalization, `1` raw expected, and `2` normalized expected. IDs
+for unused fields conventionally use `UINT32_MAX`; normalization IDs index the
+manifest's name list. Each H10W sidecar has a 64-byte header: `H10W`, version 1,
+kind, normalization ID, chromosome ID, source resolution index, BP bin size,
+word width 4 (all seven integers are u32), then u64 word count and u64 FNV-1a
+checksum, and 16 reserved zero bytes. It is followed by exactly `word-count`
+little-endian float32 words. The checksum covers the payload bytes. Paths are
+used as stored; absolute paths avoid working-directory ambiguity. Expected
+vectors cover the maximum chromosome bin count, with chromosome scale factors
+stored in the manifest. The shared [`VectorOutput`](vector_updater.h) C++ API also
+accepts exact words or a chunk loader for future built-in algorithms.
 
 ## Convert an existing V9 file
 

@@ -1,18 +1,13 @@
 #include "addnorm.h"
 #include "hic_addnorm/scale_norm.h"
 #include "reader.h"
-#include "repack.h"
+#include "vector_updater.h"
+#include "expected_vector.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <limits>
 #include <map>
-#include <set>
-#include <sys/stat.h>
-#include <tuple>
-#include <unistd.h>
-#include <zstd.h>
 
 namespace hic10 {
 namespace {
@@ -101,250 +96,7 @@ struct ExpectedAccumulator {
             if (totals[n] > 0) work[n].first->observed[chr] += totals[n];
     }
     Vector finish(uint8_t kind, uint32_t norm, uint8_t unit, uint32_t ri, bool smooth) {
-        std::vector<uint32_t> lengths;
-        for (auto e : chromosome_bins)
-            if (observed.count(e.first))
-                lengths.push_back(e.second);
-        std::sort(lengths.begin(), lengths.end());
-        std::vector<uint64_t> suffix(lengths.size() + 1, 0);
-        for (size_t i = lengths.size(); i-- > 0;)
-            suffix[i] = suffix[i + 1] + lengths[i];
-        auto possible = [&](uint64_t distance) {
-            size_t first = std::upper_bound(lengths.begin(), lengths.end(), distance) -
-                           lengths.begin();
-            return double(suffix[first]) - double(lengths.size() - first) * distance;
-        };
-        Vector v;
-        v.kind = kind;
-        v.norm = norm;
-        v.unit = unit;
-        v.ri = ri;
-        v.values.reserve(actual.size());
-        uint64_t support = lengths.empty() ? 0 : lengths.back();
-        if (smooth && support) {
-            const double minimum = 400;
-            double numerator = actual[0], denominator = possible(0);
-            uint64_t lo = 0, hi = 0;
-            for (uint64_t i = 0; i < support; ++i) {
-                if (numerator < minimum) {
-                    while (numerator < minimum && hi + 1 < support) {
-                        ++hi;
-                        numerator += actual[hi];
-                        denominator += possible(hi);
-                    }
-                } else
-                    while (hi > lo && numerator - actual[lo] - actual[hi] >= minimum) {
-                        numerator -= actual[lo] + actual[hi];
-                        denominator -= possible(lo) + possible(hi);
-                        ++lo;
-                        --hi;
-                    }
-                v.values.push_back(
-                    bits(denominator > 0 ? static_cast<float>(numerator / denominator) : 0));
-                if (hi + 2 < support) {
-                    numerator += actual[hi + 1] + actual[hi + 2];
-                    denominator += possible(hi + 1) + possible(hi + 2);
-                    hi += 2;
-                } else if (hi + 1 < support) {
-                    ++hi;
-                    numerator += actual[hi];
-                    denominator += possible(hi);
-                }
-            }
-        } else
-            for (uint64_t i = 0; i < support; ++i) {
-                double denominator = possible(i);
-                v.values.push_back(
-                    bits(denominator > 0 ? static_cast<float>(actual[i] / denominator) : 0));
-            }
-        v.values.resize(actual.size(), 0x7fc00000);
-        for (auto e : observed) {
-            double total = 0;
-            uint32_t n = chromosome_bins[e.first];
-            for (uint32_t d = 0; d < n && d < v.values.size(); ++d)
-                total += double(n - d) * floating(v.values[d]);
-            if (total > 0 && e.second > 0)
-                v.scales[e.first] = bits(static_cast<float>(total / e.second));
-        }
-        return v;
-    }
-};
-class VectorOutput {
-    FILE *file_ = nullptr;
-    std::string target_, temporary_;
-    int level_;
-    Bytes footer_bytes_;
-    struct Entry {
-        std::tuple<uint32_t, uint32_t, uint8_t, uint32_t> key;
-        Bytes bytes;
-    };
-    std::array<std::vector<Entry>, 3> entries_;
-    uint64_t position() {
-        auto p = ftello(file_);
-        check(p >= 0, "cannot determine V10 output position");
-        return p;
-    }
-    void write(const Bytes &b) {
-        check(std::fwrite(b.data(), 1, b.size(), file_) == b.size(), "cannot write V10 output");
-    }
-    Bytes compress(const Bytes &raw) {
-        Bytes out(ZSTD_compressBound(raw.size()));
-        size_t n = ZSTD_compress(out.data(), out.size(), raw.data(), raw.size(), level_);
-        check(!ZSTD_isError(n), "Zstandard compression failure");
-        out.resize(n);
-        return out;
-    }
-
-  public:
-    VectorOutput(Reader &reader, const Header &header, const std::string &path, int level)
-        : target_(path), level_(level) {
-        temporary_ = path + ".addnorm.XXXXXX";
-        std::vector<char> name(temporary_.begin(), temporary_.end());
-        name.push_back(0);
-        int fd = mkstemp(name.data());
-        check(fd >= 0, "cannot create addnorm temporary file");
-        temporary_ = name.data();
-        struct stat metadata {};
-        if (stat(path.c_str(), &metadata) == 0 && fchmod(fd, metadata.st_mode & 07777) != 0) {
-            close(fd);
-            std::remove(temporary_.c_str());
-            temporary_.clear();
-            check(false, "cannot preserve V10 file permissions");
-        }
-        file_ = fdopen(fd, "w+b");
-        if (!file_) {
-            close(fd);
-            std::remove(temporary_.c_str());
-            temporary_.clear();
-            check(false, "cannot open addnorm temporary file");
-        }
-        footer_bytes_ = repack_matrix_prefix(file_, reader, header);
-    }
-    ~VectorOutput() {
-        if (file_)
-            std::fclose(file_);
-        if (!temporary_.empty())
-            std::remove(temporary_.c_str());
-    }
-    void add(const Vector &v) {
-        Bytes descriptors;
-        constexpr uint32_t nominal = 65536;
-        for (uint64_t begin = 0; begin < v.values.size(); begin += nominal) {
-            uint32_t n = narrow(std::min<uint64_t>(nominal, v.values.size() - begin));
-            Bytes best;
-            uint8_t transform = 0;
-            for (uint8_t t = 0; t < 3; ++t) {
-                Bytes raw;
-                raw.reserve(uint64_t(n) * 4);
-                if (t == 1)
-                    for (unsigned lane = 0; lane < 4; ++lane)
-                        for (uint32_t j = 0; j < n; ++j)
-                            put(raw, v.values[begin + j] >> (8 * lane), 1);
-                else
-                    for (uint32_t j = 0; j < n; ++j)
-                        put(raw, v.values[begin + j] ^ (t == 2 && j ? v.values[begin + j - 1] : 0),
-                            4);
-                auto frame = compress(raw);
-                if (best.empty() || frame.size() < best.size()) {
-                    best = std::move(frame);
-                    transform = t;
-                }
-            }
-            Bytes stored;
-            magic(stored, "H10V");
-            put(stored, 1, 1);
-            put(stored, transform, 1);
-            put(stored, 0, 2);
-            put(stored, uint64_t(n) * 4, 4);
-            put(stored, n, 4);
-            append(stored, best);
-            uint64_t pos = position();
-            write(stored);
-            put(descriptors, begin, 8);
-            put(descriptors, n, 4);
-            put(descriptors, transform, 1);
-            put(descriptors, 1, 1);
-            put(descriptors, 0, 2);
-            put(descriptors, pos, 8);
-            put(descriptors, stored.size(), 4);
-            put(descriptors, uint64_t(n) * 4, 4);
-        }
-        Bytes entry;
-        put(entry, 0, 4);
-        if (v.kind != 1)
-            put(entry, v.norm, 4);
-        if (v.kind == 0)
-            put(entry, v.chr, 4);
-        put(entry, v.unit, 1);
-        put(entry, 0, 3);
-        put(entry, v.ri, 4);
-        put(entry, 0, 4);
-        put(entry, v.values.size(), 8);
-        put(entry, nominal, 4);
-        put(entry, descriptors.size() / 32, 4);
-        if (v.kind) {
-            put(entry, v.scales.size(), 4);
-            put(entry, 0, 4);
-            for (auto s : v.scales) {
-                put(entry, s.first, 4);
-                put(entry, s.second, 4);
-            }
-        }
-        append(entry, descriptors);
-        entries_[v.kind].push_back(
-            {{v.kind == 1 ? 0 : v.norm, v.kind == 0 ? v.chr : 0, v.unit, v.ri}, std::move(entry)});
-    }
-    void finish(const Header &header) {
-        for (uint8_t kind = 0; kind < 3; ++kind) {
-            auto &list = entries_[kind];
-            if (list.empty())
-                continue;
-            std::sort(list.begin(), list.end(), [](auto &a, auto &b) { return a.key < b.key; });
-            Bytes index;
-            magic(index, kind == 0 ? "NVI0" : kind == 1 ? "EVI0" : "NEVI");
-            put(index, 1, 4);
-            put(index, list.size(), 4);
-            put(index, 0, 4);
-            for (auto &item : list) {
-                auto &entry = item.bytes;
-                uint8_t unit = std::get<2>(item.key);
-                uint32_t ri = std::get<3>(item.key);
-                uint32_t bin = header.resolutions[unit][ri].bin;
-                size_t binOffset = 4 + (kind != 1 ? 4 : 0) + (kind == 0 ? 4 : 0) + 4 + 4;
-                for (unsigned j = 0; j < 4; ++j)
-                    entry[binOffset + j] = static_cast<uint8_t>(bin >> (8 * j));
-                uint32_t length = narrow(entry.size());
-                for (unsigned j = 0; j < 4; ++j)
-                    entry[j] = static_cast<uint8_t>(length >> (8 * j));
-                append(index, entry);
-            }
-            uint64_t pos = position();
-            write(index);
-            Bytes loc;
-            put(loc, pos, 8);
-            put(loc, index.size(), 8);
-            auto saved = position();
-            check(fseeko(file_, 32 + 16 * kind, SEEK_SET) == 0, "cannot patch V10 vector locator");
-            write(loc);
-            check(fseeko(file_, saved, SEEK_SET) == 0, "cannot restore V10 output position");
-        }
-        uint64_t footer_position = position();
-        write(footer_bytes_);
-        Bytes footer_locator;
-        put(footer_locator, footer_position, 8);
-        put(footer_locator, footer_bytes_.size(), 8);
-        auto saved = position();
-        check(fseeko(file_, 16, SEEK_SET) == 0, "cannot patch V10 footer locator");
-        write(footer_locator);
-        check(fseeko(file_, saved, SEEK_SET) == 0, "cannot restore V10 output position");
-        check(std::fflush(file_) == 0 && fsync(fileno(file_)) == 0,
-              "cannot sync normalized V10 file");
-        auto f = file_;
-        file_ = nullptr;
-        check(std::fclose(f) == 0, "cannot close normalized V10 file");
-        check(std::rename(temporary_.c_str(), target_.c_str()) == 0,
-              "cannot replace normalized V10 file");
-        temporary_.clear();
+        return finish_expected(actual, observed, chromosome_bins, kind, norm, unit, ri, smooth);
     }
 };
 uint32_t norm_id(const Header &h, const std::string &name) {
@@ -359,29 +111,44 @@ bool real_chromosome(const Chromosome &c) {
 void add_norm_v10(const std::string &path, const AddNormOptions &options) {
     Reader reader(path);
     Header h = reader.header();
-    std::set<std::string> standard{"VC", "VC_SQRT", "SCALE"};
-    for (auto name : h.norms)
-        if (!standard.count(name) &&
-            (reader.vector_indexes()[0].length || reader.vector_indexes()[2].length))
-            throw std::runtime_error(
-                "V10: refusing to discard existing unsupported normalization " + name);
     bool build_scale = false;
     if (options.scale)
         for (uint8_t unit = 0; unit < 2; ++unit)
             for (const auto &resolution : h.resolutions[unit])
                 if (unit != 0 || options.minimum_scale_resolution == 0 ||
-                    int(resolution.bin) >= options.minimum_scale_resolution)
+                    resolution.bin >= uint32_t(options.minimum_scale_resolution))
                     build_scale = true;
-    h.norms.clear();
-    if (options.vc)
+    if (options.vc && std::find(h.norms.begin(), h.norms.end(), "VC") == h.norms.end())
         h.norms.push_back("VC");
-    if (options.vc_sqrt)
+    if (options.vc_sqrt && std::find(h.norms.begin(), h.norms.end(), "VC_SQRT") == h.norms.end())
         h.norms.push_back("VC_SQRT");
-    if (build_scale)
+    if (build_scale && std::find(h.norms.begin(), h.norms.end(), "SCALE") == h.norms.end())
         h.norms.push_back("SCALE");
     uint32_t vc = options.vc ? norm_id(h, "VC") : UINT32_MAX;
     uint32_t vcs = options.vc_sqrt ? norm_id(h, "VC_SQRT") : UINT32_MAX;
     uint32_t scale = build_scale ? norm_id(h, "SCALE") : UINT32_MAX;
+    auto existing = reader.vector_entries();
+    auto present = [&](uint32_t norm, uint8_t unit, uint32_t ri) {
+        for (const auto &e : existing)
+            if (e.kind != 1 && e.norm == norm && e.unit == unit && e.ri == ri) return true;
+        return false;
+    };
+    bool work = false;
+    for (uint8_t unit = 0; unit < 2; ++unit)
+        for (uint32_t ri = 0; ri < h.resolutions[unit].size(); ++ri) {
+            bool raw_present = false;
+            for (const auto &e : existing)
+                if (e.kind == 1 && e.unit == unit && e.ri == ri) raw_present = true;
+            bool scale_requested = build_scale && (unit || !options.minimum_scale_resolution ||
+                h.resolutions[unit][ri].bin >= uint32_t(options.minimum_scale_resolution));
+            work |= !raw_present || (options.vc && !present(vc, unit, ri)) ||
+                (options.vc_sqrt && !present(vcs, unit, ri)) ||
+                (scale_requested && !present(scale, unit, ri));
+        }
+    if (!work) {
+        std::fprintf(stderr, "Requested V10 normalization bundles already exist: %s\n", path.c_str());
+        return;
+    }
     VectorOutput output(reader, h, path, options.compression_level);
     for (uint8_t unit = 0; unit < 2; ++unit)
         for (uint32_t ri = 0; ri < h.resolutions[unit].size(); ++ri) {
@@ -393,13 +160,19 @@ void add_norm_v10(const std::string &path, const AddNormOptions &options) {
             for (uint32_t chr = 0; chr < h.chromosomes.size(); ++chr)
                 maximum = std::max(maximum, narrow(h.bins(chr, unit, ri)));
             check(maximum != 0, "cannot create an empty expected vector");
-            ExpectedAccumulator raw(maximum);
-            ExpectedAccumulator expected_vc(maximum), expected_vcs(maximum),
-                                expected_scale(maximum);
-            uint32_t written_vc = 0, written_vcs = 0, written_scale = 0;
+            const bool do_vc = options.vc && !present(vc, unit, ri);
+            const bool do_vcs = options.vc_sqrt && !present(vcs, unit, ri);
+            const bool do_raw = !output.contains(1, 0, 0, unit, ri);
             const bool do_scale =
-                build_scale && (unit != 0 || options.minimum_scale_resolution == 0 ||
-                                int(bin) >= options.minimum_scale_resolution);
+                build_scale && !present(scale, unit, ri) && (unit != 0 || options.minimum_scale_resolution == 0 ||
+                                bin >= uint32_t(options.minimum_scale_resolution));
+
+            if (!do_vc && !do_vcs && !do_scale && !do_raw) continue;
+
+            ExpectedAccumulator raw(do_raw ? maximum : 0);
+            ExpectedAccumulator expected_vc(do_vc ? maximum : 0), expected_vcs(do_vcs ? maximum : 0),
+                                expected_scale(do_scale ? maximum : 0);
+            uint32_t written_vc = 0, written_vcs = 0, written_scale = 0;
 
             auto save_norm = [&](uint32_t chr, uint32_t id,
                                  const std::vector<float>& norm, uint32_t& written) {
@@ -433,11 +206,11 @@ void add_norm_v10(const std::string &path, const AddNormOptions &options) {
                 auto s = sparse_matrix(reader.matrix(chr, chr, unit, ri),
                                        narrow(h.bins(chr, unit, ri)));
                 std::vector<float> coverage, vc_norm, vcs_norm, scale_norm;
-                if (!s.row.empty() && (options.vc || options.vc_sqrt))
+                if (!s.row.empty() && (do_vc || do_vcs))
                     coverage = raw_vc(s);
 
-                if (options.vc) vc_norm = coverage;
-                if (options.vc_sqrt) {
+                if (do_vc) vc_norm = coverage;
+                if (do_vcs) {
                     vcs_norm = coverage;
                     for (float& value : vcs_norm) value = std::sqrt(value);
                 }
@@ -474,7 +247,8 @@ void add_norm_v10(const std::string &path, const AddNormOptions &options) {
                 fix_sum(s, norms);
 
                 std::vector<std::pair<ExpectedAccumulator*, const std::vector<float>*>>
-                    expected_work{{&raw, nullptr}};
+                    expected_work;
+                if (do_raw) expected_work.push_back({&raw, nullptr});
                 if (!vc_norm.empty()) expected_work.push_back({&expected_vc, &vc_norm});
                 if (!vcs_norm.empty()) expected_work.push_back({&expected_vcs, &vcs_norm});
                 if (!scale_norm.empty())
@@ -486,16 +260,16 @@ void add_norm_v10(const std::string &path, const AddNormOptions &options) {
                 if (!scale_norm.empty()) save_norm(chr, scale, scale_norm, written_scale);
             }
 
-            output.add(raw.finish(1, 0, unit, ri, true));
+            if (do_raw) output.add(raw.finish(1, 0, unit, ri, true));
             if (written_vc)
                 output.add(expected_vc.finish(2, vc, unit, ri, true));
             if (written_vcs)
                 output.add(expected_vcs.finish(2, vcs, unit, ri, true));
             if (written_scale)
                 output.add(expected_scale.finish(2, scale, unit, ri, true));
-            if (options.vc)
+            if (do_vc)
                 std::fprintf(stderr, "  VC (%u chromosomes)\n", written_vc);
-            if (options.vc_sqrt)
+            if (do_vcs)
                 std::fprintf(stderr, "  VC_SQRT (%u chromosomes)\n", written_vcs);
             if (do_scale)
                 std::fprintf(stderr, "  SCALE (%u chromosomes)\n", written_scale);

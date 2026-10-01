@@ -1,4 +1,7 @@
 #include "addnorm.h"
+#include "norm_selection.h"
+#include "vector_import.h"
+#include "text_vectors.h"
 #include "pre.h"
 #include <climits>
 #include <cmath>
@@ -10,7 +13,7 @@ static void usage() {
         << "Usage:\n"
            "  hic_v10 pre [options] <pairs> <output.hic> <chrom.sizes|genome-id>\n"
            "  hic_v10 convert [options] <input.v9.hic> <output.v10.hic>\n"
-           "  hic_v10 addnorm [options] <file.v10.hic>\n\n"
+           "  hic_v10 addnorm [options] <file.v10.hic> (also: add-norm)\n\n"
            "Common options:\n"
            "  --level N          Zstandard compression level (default 6)\n"
            "\nPre/convert writer options:\n"
@@ -35,7 +38,11 @@ static void usage() {
            "  --intra            Retain cis contacts only\n"
            "  --near-diag        Discard cis contacts beyond 10 Mb\n"
            "\nAddnorm options (V10 file is replaced atomically in place):\n"
-           "  --no-vc            Skip VC normalization\n"
+           "  --norm TYPES       Compute only VC,VC_SQRT,SCALE (comma-separated or repeatable)\n"
+           "  --norm-file PATH   Import HIC_NORM_VECTORS text; calculate normalized expected\n"
+           "  --tmp DIR          Text import scratch directory (default /tmp)\n"
+           "  --vectors PATH     Import a BP vectors.manifest instead of computing norms\n"
+           "  --no-vc            Skip computing VC normalization\n"
            "  --no-vc-sqrt       Skip VC_SQRT normalization\n"
            "  --no-scale         Skip SCALE normalization\n"
            "  -t N               SCALE threads for addnorm (default 4)\n"
@@ -43,8 +50,8 @@ static void usage() {
            "  --iter N           SCALE maximum total iterations (default 2000)\n"
            "  --min-res N        Minimum BP resolution for SCALE (default all)\n"
            "  -h, --help         Show this help\n\n"
-           "Raw and normalized expected vectors are rebuilt at every stored or derived\n"
-           "resolution. Default hic_pre and hic_addnorm remain V9-only.\n";
+           "Existing normalizations and expected vectors are preserved exactly. New types\n"
+           "are added at materialized and derived resolutions. V9 commands remain V9-only.\n";
 }
 static uint32_t number(const std::string &s) {
     hic10::check(!s.empty() && s.find_first_not_of("0123456789") == std::string::npos,
@@ -58,6 +65,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         std::string command = argv[1];
+        if (command == "add-norm") command = "addnorm";
         if (command == "-h" || command == "--help") {
             usage();
             return 0;
@@ -67,6 +75,8 @@ int main(int argc, char **argv) {
         hic10::Options opts;
         hic10::PreOptions pre;
         hic10::AddNormOptions addnorm;
+        bool norm_selected = false;
+        std::string vector_manifest, norm_file, norm_tmp = "/tmp";
         std::vector<std::string> args;
         for (int i = 2; i < argc; ++i) {
             std::string arg = argv[i];
@@ -134,6 +144,14 @@ int main(int argc, char **argv) {
                 pre.intra = true;
             else if (command == "pre" && arg == "--near-diag")
                 pre.nearDiagonal = true;
+            else if (command == "addnorm" && arg == "--norm")
+                hic10::select_norms(value(), addnorm.vc, addnorm.vc_sqrt, addnorm.scale, norm_selected);
+            else if (command == "addnorm" && arg == "--norm-file")
+                norm_file = value();
+            else if (command == "addnorm" && arg == "--tmp")
+                norm_tmp = value();
+            else if (command == "addnorm" && arg == "--vectors")
+                vector_manifest = value();
             else if (command == "addnorm" && arg == "--no-vc")
                 addnorm.vc = false;
             else if (command == "addnorm" && arg == "--no-vc-sqrt")
@@ -180,8 +198,18 @@ int main(int argc, char **argv) {
             hic10::pre(args[0], args[1], args[2], opts, pre);
         else if (command == "convert")
             hic10::convert(args[0], args[1], opts);
-        else
-            hic10::add_norm_v10(args[0], addnorm);
+        else {
+            hic10::check(!norm_selected || (vector_manifest.empty() && norm_file.empty()),
+                         "--norm cannot be combined with --vectors or --norm-file");
+            hic10::check(norm_file.empty() || vector_manifest.empty(),
+                         "--norm-file and --vectors are alternative input formats");
+            if (!norm_file.empty())
+                hic10::add_text_vectors_v10(args[0], norm_file, addnorm.compression_level, norm_tmp);
+            else if (!vector_manifest.empty()) {
+                hic10::check(!norm_selected, "--vectors cannot be combined with --norm");
+                hic10::add_vector_manifest_v10(args[0], vector_manifest, addnorm.compression_level);
+            } else hic10::add_norm_v10(args[0], addnorm);
+        }
         return 0;
     } catch (const std::exception &e) {
         std::cerr << "Error: " << e.what() << '\n';

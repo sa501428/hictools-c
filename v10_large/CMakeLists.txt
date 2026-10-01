@@ -11,6 +11,11 @@ add_executable(hic_v10_large
     writer.cpp
     vectors.cpp
     normalize.cpp
+    addnorm.cpp
+    ${PROJECT_SOURCE_DIR}/v10/repack.cpp
+    ${PROJECT_SOURCE_DIR}/v10/vector_updater.cpp
+    ${PROJECT_SOURCE_DIR}/v10/vector_import.cpp
+    ${PROJECT_SOURCE_DIR}/v10/text_vectors.cpp
     scale.cpp
     ${PROJECT_SOURCE_DIR}/v10/reader.cpp
 )
@@ -35,6 +40,16 @@ if(BUILD_TESTING)
     add_test(NAME v10_large_stage_and_rollup
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_large.py
               $<TARGET_FILE:hic_v10_large> $<TARGET_FILE:hic_v10>)
+    add_test(NAME v10_additive_normalization
+      COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/v10/tests/test_additive_norm.py
+              $<TARGET_FILE:hic_v10> $<TARGET_FILE:hic_v10_large>)
+    add_test(NAME v10_supplied_text_normalization
+      COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/v10/tests/test_text_norm.py
+              $<TARGET_FILE:hic_v10> $<TARGET_FILE:hic_v10_large>)
+    set_tests_properties(v10_supplied_text_normalization PROPERTIES
+      ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    set_tests_properties(v10_additive_normalization PROPERTIES
+      ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     set_tests_properties(v10_large_stage_and_rollup PROPERTIES
       ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
   endif()

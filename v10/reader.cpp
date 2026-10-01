@@ -109,7 +109,11 @@ Reader::Reader(const std::string &path) {
     header_.genome = c.string();
     uint32_t n = c.word();
     for (uint32_t i = 0; i < n; ++i)
-        header_.attributes.emplace_back(c.string(), c.string());
+        {
+            auto key = c.string();
+            auto value = c.string();
+            header_.attributes.emplace_back(std::move(key), std::move(value));
+        }
     n = c.word();
     check(n > 0, "V10 file has no chromosomes");
     for (uint32_t i = 0; i < n; ++i)
@@ -127,7 +131,7 @@ Reader::Reader(const std::string &path) {
         }
         for (uint32_t i = 0; i < list.size(); ++i) {
             const auto &r = list[i];
-            check(r.bin && r.mode <= 1 && r.aggregation == 1, "invalid V10 resolution");
+            check(r.bin && r.mode <= 1 && r.aggregation <= 1 && (!r.mode || r.aggregation == 1), "invalid V10 resolution");
             if (!r.mode)
                 check(r.source == UINT32_MAX, "materialized V10 resolution has a source");
             else
@@ -244,14 +248,16 @@ uint64_t Reader::vector_data_start() {
     check(first >= 88 && first <= footer_.position, "invalid V10 vector section order");
     return first;
 }
-std::vector<uint64_t> Reader::matrix_relocation_fields() {
+std::vector<uint64_t> Reader::matrix_relocation_fields(std::vector<FileLocator> *storage) {
     std::vector<uint64_t> fields;
     for (auto key : matrix_keys_) {
         const auto &meta = metadata(key);
+        if (storage) storage->push_back(matrix_location(key));
         for (const auto &z : meta.zooms) {
             if (!z.block_index.length)
                 continue;
             fields.push_back(z.block_index_position_field);
+            if (storage) storage->push_back(z.block_index);
             auto bytes = read_bytes(z.block_index.position, z.block_index.length);
             Cursor c(bytes);
             c.magic4("H10I");
@@ -266,9 +272,12 @@ std::vector<uint64_t> Reader::matrix_relocation_fields() {
                 uint32_t number = c.word();
                 check(!i || number > previous, "unordered V10 block index");
                 previous = number;
-                c.word();
+                uint32_t length = c.word();
                 fields.push_back(z.block_index.position + c.at);
-                c.wide();
+                uint64_t position = c.wide();
+                check(length >= 16 && position <= file_size_ && length <= file_size_ - position,
+                      "invalid V10 block interval");
+                if (storage) storage->push_back({position, length});
             }
             c.done();
         }
@@ -339,7 +348,8 @@ const Reader::MatrixMeta &Reader::metadata(MatrixKey key) {
     c.done();
     return matrix_metadata_.emplace(key, std::move(meta)).first->second;
 }
-Matrix Reader::materialized(MatrixKey key, const Zoom &z) {
+Matrix Reader::materialized(MatrixKey key, const Zoom &z,
+                            const std::function<void(const Cell &)> &emit) {
     Matrix result;
     result.scores = z.type != 0;
     if (!z.blocks)
@@ -355,6 +365,7 @@ Matrix Reader::materialized(MatrixKey key, const Zoom &z) {
               z.block_index.length == 24 + uint64_t(blockCount) * 16,
           "invalid V10 block index length");
     uint32_t previous = 0;
+    uint64_t total_emitted = 0;
     for (uint32_t i = 0; i < blockCount; ++i) {
         uint32_t number = c.word();
         check(!i || number > previous, "unordered V10 block index");
@@ -474,18 +485,108 @@ Matrix Reader::materialized(MatrixKey key, const Zoom &z) {
                               : narrow(uint64_t(by / z.block_bins) * z.columns +
                                        bx / z.block_bins)) == number,
                   "V10 block cell outside matrix");
-            result.cells.push_back({bx, by, value});
+            if (emit) emit({bx, by, value});
+            else result.cells.push_back({bx, by, value});
             ++emitted;
         }
         check(emitted == occupied, "V10 block occupancy mismatch");
+        total_emitted = plus(total_emitted, emitted);
     }
     c.done();
-    check(result.cells.size() == z.occupied, "V10 matrix occupancy mismatch");
+    check(total_emitted == z.occupied, "V10 matrix occupancy mismatch");
     std::sort(result.cells.begin(), result.cells.end(), [](auto a, auto b) {
         return std::tie(a.y, a.x) < std::tie(b.y, b.x);
     });
     return result;
 }
+void Reader::stream_materialized(uint32_t chr1, uint32_t chr2, uint8_t unit, uint32_t ri,
+                                 const std::function<void(const Cell &)> &emit) {
+    for (const auto &z : metadata({chr1, chr2}).zooms)
+        if (z.unit == unit && z.resolution == ri) {
+            check(!z.mode && !z.type, "cell streaming requires materialized COUNT_UINT data; use hic_v10 for scores");
+            materialized({chr1, chr2}, z, emit);
+            return;
+        }
+    check(false, "missing V10 materialized resolution");
+}
+
+std::vector<VectorEntry> Reader::vector_entries() {
+    std::vector<VectorEntry> result;
+    for (uint8_t kind = 0; kind < 3; ++kind) {
+        auto loc = vector_indexes_[kind];
+        if (!loc.length) continue;
+        auto bytes = read_bytes(loc.position, loc.length);
+        Cursor c(bytes);
+        c.magic4(kind == 0 ? "NVI0" : kind == 1 ? "EVI0" : "NEVI");
+        check(c.word() == 1, "unsupported V10 vector index version");
+        uint32_t count = c.word();
+        c.zero(4);
+        std::tuple<uint32_t, uint32_t, uint8_t, uint32_t> previous;
+        for (uint32_t i = 0; i < count; ++i) {
+            size_t start = c.at;
+            uint32_t length = c.word();
+            check(length >= 4, "invalid V10 vector entry length");
+            Cursor e = c.take(length - 4);
+            VectorEntry v;
+            v.kind = kind;
+            if (kind != 1) {
+                v.norm = e.word();
+                check(v.norm < header_.norms.size(), "invalid V10 vector normalization ID");
+            }
+            if (kind == 0) {
+                v.chr = e.word();
+                check(v.chr < header_.chromosomes.size(), "invalid V10 vector chromosome");
+            }
+            v.unit = e.byte(); e.zero(3); v.ri = e.word();
+            check(v.unit <= 1 && v.ri < header_.resolutions[v.unit].size(),
+                  "invalid V10 vector resolution");
+            check(e.word() == header_.resolutions[v.unit][v.ri].bin, "V10 vector bin mismatch");
+            uint64_t words = e.wide();
+            uint32_t nominal = e.word(); v.chunks = e.word();
+            check(words ? nominal && v.chunks : !v.chunks, "invalid V10 vector chunk count");
+            uint64_t expected_words = 0;
+            if (kind == 0) expected_words = header_.bins(v.chr, v.unit, v.ri);
+            else for (uint32_t chr = 0; chr < header_.chromosomes.size(); ++chr)
+                expected_words = std::max(expected_words, header_.bins(chr, v.unit, v.ri));
+            check(words == expected_words, "V10 vector length mismatch");
+            if (kind) {
+                uint32_t scales = e.word(); e.zero(4);
+                uint32_t last = 0;
+                for (uint32_t j = 0; j < scales; ++j) {
+                    uint32_t chr = e.word(); e.word();
+                    check(chr < header_.chromosomes.size() && (!j || chr > last),
+                          "invalid V10 expected chromosome scales");
+                    last = chr;
+                }
+            }
+            v.descriptors = 4 + e.at;
+            uint64_t next = 0;
+            for (uint32_t j = 0; j < v.chunks; ++j) {
+                check(e.wide() == next, "noncontiguous V10 vector chunks");
+                uint32_t n = e.word(); uint8_t transform = e.byte(), codec = e.byte(); e.zero(2);
+                uint64_t pos = e.wide(); uint32_t stored = e.word(), raw = e.word();
+                check(n && uint64_t(n) * 4 == raw && transform <= 2 && codec == 1 &&
+                          stored > 16 && pos >= header_length_ && pos <= file_size_ && stored <= file_size_ - pos,
+                      "invalid V10 vector chunk descriptor");
+                auto chunk_header = read_bytes(pos, 16);
+                Cursor ch(chunk_header); ch.magic4("H10V");
+                check(ch.byte() == 1 && ch.byte() == transform, "V10 vector chunk header mismatch");
+                ch.zero(2);
+                check(ch.word() == raw && ch.word() == n, "V10 vector chunk size mismatch");
+                next = plus(next, n);
+            }
+            check(next == words, "V10 vector word count mismatch");
+            e.done();
+            auto key = std::make_tuple(v.norm, v.chr, v.unit, v.ri);
+            check(!i || previous < key, "unordered or duplicate V10 vector key"); previous = key;
+            v.bytes.assign(bytes.begin() + start, bytes.begin() + start + length);
+            result.push_back(std::move(v));
+        }
+        c.done();
+    }
+    return result;
+}
+
 Matrix Reader::matrix(uint32_t chr1, uint32_t chr2, uint8_t unit, uint32_t ri) {
     MatrixKey key{chr1, chr2};
     auto loc = matrix_locations_.find(key);

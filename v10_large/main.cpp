@@ -3,6 +3,9 @@
 #include "stage.h"
 #include "writer.h"
 #include "normalize.h"
+#include "addnorm.h"
+#include "v10/norm_selection.h"
+#include "v10/vector_import.h"
 #include "v10/reader.h"
 
 #include <climits>
@@ -52,6 +55,12 @@ void usage() {
            "      <stage.manifest> <build.manifest> <vectors-dir> <resolution-index>\n"
            "  hic_v10_large finalize-vectors [normalization options]\n"
            "      <stage.manifest> <build.manifest> <vectors-dir>\n\n"
+           "  hic_v10_large addnorm [--norm VC,VC_SQRT,SCALE] [--memory SIZE] [--tmp DIR]\n"
+           "      [-t N] [--tol X] [--iter N] [--fan-in N] [--level N] <file.v10.hic>\n"
+           "  hic_v10_large addnorm --norm-file <vectors.txt> [--memory SIZE] [--tmp DIR]\n"
+           "      <file.v10.hic> (calculates normalized expected from supplied divisors)\n"
+           "  hic_v10_large addnorm --vectors <vectors.manifest> <file.v10.hic>\n"
+           "      Existing vectors and raw blocks are preserved; add-norm is an alias.\n\n"
            "  hic_v10_large validate-v10 [--matrix CHR1:CHR2:BIN] <file.v10.hic>\n\n"
            "The large-data builder is separate from hic_v10 pre. Stage validates the\n"
            "entire gzip/HBS stream, checks chromosome-pair contiguity, and writes\n"
@@ -117,6 +126,7 @@ int main(int argc, char **argv) {
             return argc < 2 ? 1 : 0;
         }
         std::string command = argv[1];
+        if (command == "add-norm") command = "addnorm";
         if (command == "stage") {
             StageOptions options;
             std::vector<std::string> args;
@@ -250,10 +260,13 @@ int main(int argc, char **argv) {
                         "--pair is not valid for merge-pairs");
                 merge_pair_v10(args[0], args[1], args[2], args[3], options);
             }
-        } else if (command == "normalize" || command == "plan-normalize" ||
+        } else if (command == "addnorm" || command == "normalize" || command == "plan-normalize" ||
                    command == "normalize-chr" || command == "expected-res" ||
                    command == "finalize-vectors") {
             NormalizeOptions options;
+            bool norm_selected = false;
+            std::string vector_manifest, norm_file;
+            int level = 3;
             std::vector<std::string> args;
             for (int i = 2; i < argc; ++i) {
                 std::string arg = argv[i];
@@ -261,11 +274,29 @@ int main(int argc, char **argv) {
                     require(i + 1 < argc, "missing value for " + arg);
                     return std::string(argv[++i]);
                 };
-                if (arg == "--memory") options.memory_bytes = parse_size(value());
+                if (command == "addnorm" && arg == "--norm")
+                    hic10::select_norms(value(), options.vc, options.vc_sqrt, options.scale, norm_selected);
+                else if (command == "addnorm" && arg == "--norm-file") norm_file = value();
+                else if (command == "addnorm" && arg == "--vectors") vector_manifest = value();
+                else if (command == "addnorm" && arg == "--level") {
+                    auto text = value(); size_t used = 0; level = std::stoi(text, &used);
+                    require(used == text.size(), "invalid compression level");
+                }
+                else if (arg == "--memory") options.memory_bytes = parse_size(value());
                 else if (arg == "--tmp") options.temporary_directory = value();
-                else if (arg == "-t") options.scale_options.threads = static_cast<int>(number(value()));
-                else if (arg == "--tol") options.scale_options.tolerance = std::stod(value());
-                else if (arg == "--iter") options.scale_options.max_iterations = static_cast<int>(number(value()));
+                else if (arg == "-t" || arg == "--iter") {
+                    uint64_t n = number(value());
+                    require(n > 0 && n <= INT_MAX, arg + " must be between 1 and INT_MAX");
+                    if (arg == "-t") options.scale_options.threads = static_cast<int>(n);
+                    else options.scale_options.max_iterations = static_cast<int>(n);
+                }
+                else if (arg == "--tol") {
+                    auto text = value(); size_t used = 0;
+                    options.scale_options.tolerance = std::stod(text, &used);
+                    require(used == text.size() && options.scale_options.tolerance > 0 &&
+                                std::isfinite(options.scale_options.tolerance),
+                            "tolerance must be finite and positive");
+                }
                 else if (arg == "--fan-in") options.scale_options.merge_fan_in = static_cast<size_t>(number(value()));
                 else if (arg == "--no-vc") options.vc = false;
                 else if (arg == "--no-vc-sqrt") options.vc_sqrt = false;
@@ -282,9 +313,22 @@ int main(int argc, char **argv) {
             require(options.scale_options.warm_vc_exponent >= 0 &&
                         std::isfinite(options.scale_options.warm_vc_exponent),
                     "--warm-vc-exponent must be finite and nonnegative");
-            size_t wanted = command == "normalize-chr" || command == "expected-res" ? 4 : 3;
+            size_t wanted = command == "addnorm" ? 1 :
+                            command == "normalize-chr" || command == "expected-res" ? 4 : 3;
             require(args.size() == wanted, command + " received the wrong number of arguments");
-            if (command == "normalize") normalize_cells(args[0], args[1], args[2], options);
+            if (command == "addnorm") {
+                require(options.scale_options.threads > 0 && options.scale_options.max_iterations > 0 &&
+                            options.scale_options.tolerance > 0 && std::isfinite(options.scale_options.tolerance),
+                        "normalization threads, iterations, and tolerance must be positive");
+                require(!norm_selected || (vector_manifest.empty() && norm_file.empty()),
+                        "--norm cannot be combined with --vectors or --norm-file");
+                require(norm_file.empty() || vector_manifest.empty(),
+                        "--norm-file and --vectors are alternative input formats");
+                if (!norm_file.empty()) add_text_norm_file(args[0], norm_file, options, level);
+                else if (vector_manifest.empty()) add_norm_file(args[0], options, level);
+                else hic10::add_vector_manifest_v10(args[0], vector_manifest, level);
+            }
+            else if (command == "normalize") normalize_cells(args[0], args[1], args[2], options);
             else if (command == "plan-normalize")
                 print_normalize_tasks(args[0], args[1], args[2], options);
             else if (command == "normalize-chr")

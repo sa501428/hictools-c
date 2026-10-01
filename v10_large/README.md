@@ -184,6 +184,70 @@ smaller amount controlled by `--fan-in`. On a node with a 150 GB hard limit,
 16–32 GiB per concurrent sort job leaves ample headroom. Running several jobs
 on one node requires dividing that budget between them.
 
+### Add normalizations to a completed V10 file
+
+The finished `.hic` file can be normalized after assembly, even when the original
+HBS input, stage/build manifests, and cell runs are no longer available:
+
+```sh
+build/hic_v10_large addnorm --norm VC completed.v10.hic
+build/hic_v10_large addnorm --norm VC_SQRT,SCALE -t 8 \
+  --memory 8GiB --tmp /local/scratch completed.v10.hic
+```
+
+`add-norm` is an alias. Omitting `--norm` selects VC, VC_SQRT, and SCALE. Existing
+`--no-*`, `--tol`, `--iter`, `--fan-in`, `--no-warm-start`, and
+`--warm-vc-exponent` options also work. `--level` controls compression of new
+vector chunks (default 3). Existing normalization types, their vectors,
+normalized expected values, and raw expected values remain exact. Existing
+normalization IDs stay stable. An existing type/resolution bundle is skipped as
+a whole, including one present for only a subset of chromosomes; this command
+adds new bundles rather than repairing or replacing existing ones.
+
+The command decodes cis matrices one materialized block at a time, externally
+sorts cells into disk-backed runs, aggregates derived targets from their declared
+sources, then runs the existing large-data VC/VC_SQRT/SCALE pipeline. It does not
+retain a full contact matrix in RAM. `--memory` bounds sort buffers, not total
+RSS: decoded blocks, block indexes, per-bin vectors, expected accumulators, and
+SCALE working arrays require additional memory. The normalization memory estimates
+below still apply. Extraction and normalization workspaces are created under
+`--tmp` (default `/tmp`) and removed on success or ordinary failure. Scratch must
+hold extracted cis cell runs and normalization sidecars. The replacement `.hic`
+is staged beside the original, requiring space for a second file on that
+filesystem; the original is replaced only after successful completion.
+
+This computation path supports **BP COUNT_UINT files**. For FRAG or score files,
+use `hic_v10 addnorm`, which retains its in-memory normalization path. The shared
+additive writer preserves all raw blocks and existing vector chunks without
+recompression, including custom normalizations.
+
+Externally computed divisors can also be supplied directly as text; the tool
+calculates their normalized expected arrays and chromosome scale factors:
+
+```sh
+build/hic_v10_large addnorm --norm-file supplied-vectors.txt \
+  --memory 8GiB --tmp /local/scratch completed.v10.hic
+```
+
+The [text vector format](../v10/README.md#supply-normalization-vectors-as-text)
+uses `HIC_NORM_VECTORS 1`, followed by `vector TYPE CHROMOSOME UNIT BIN_SIZE`
+blocks, one divisor per bin, and `end` markers. Imported divisors are not rescaled.
+The large text path streams materialized count blocks and externally sorts and
+rolls up derived targets; it supports BP and FRAG count matrices. Use the regular
+text importer for score matrices. Existing bundles are preserved and skipped.
+
+If sidecars were already computed, attach them without rebuilding raw matrices:
+
+```sh
+build/hic_v10_large addnorm --vectors vectors/vectors.manifest completed.v10.hic
+```
+
+`--vectors` supports additional normalization names supplied by another
+algorithm. See the [sidecar import contract](../v10/README.md#import-another-normalization-algorithm)
+for file layout, dimensions, chromosome ordering, and checksum requirements.
+The vector-only import can also preserve FRAG sections in the destination; the
+imported sidecars describe BP vectors.
+
 ### 3. Compute normalization sidecars
 
 The local orchestrator is:

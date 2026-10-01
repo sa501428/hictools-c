@@ -127,8 +127,8 @@ def main():
         assert serial_pairs.read_bytes() == parallel_pairs.read_bytes()
         assert not list(p.glob('hic-v10-*'))
         # V10 addnorm computes vectors for both physical and derived resolutions.
-        # It also rebuilds raw expected and normalized expected indexes, without
-        # touching the matrix section. A second run replaces rather than grows it.
+        # Existing vectors stay exact. Matrix blocks are copied without recompression,
+        # and a second run does not grow the file.
         normalized = p/'input.pairs.hic'
         before = Hic(normalized)
         before_records = {res: before.records(0, 0, res) for res in (100, 200)}
@@ -170,7 +170,7 @@ def main():
         Hic(normalized)
         run([v10, 'addnorm', '--no-vc-sqrt', '--no-scale', normalized])
         h = Hic(normalized)
-        assert h.norms == ['VC']
+        assert h.norms == ['VC', 'VC_SQRT']
         assert h.records(0, 0, 200) == before_records[200]
         run([v10, 'addnorm', '--no-scale', normalized])
         assert Hic(normalized).norms == ['VC', 'VC_SQRT']
@@ -178,8 +178,8 @@ def main():
         raw_only.write_bytes(normalized.read_bytes())
         run([v10, 'addnorm', '--no-vc', '--no-vc-sqrt', '--no-scale', raw_only])
         raw = Hic(raw_only)
-        assert raw.norms == []
-        assert raw.vector_locs[0] == (0, 0) and raw.vector_locs[2] == (0, 0)
+        assert raw.norms == ['VC', 'VC_SQRT']
+        assert raw.vectors == Hic(normalized).vectors
         assert raw.vector_locs[1][0] and raw.vector_locs[1][1]
         if straw:
             assert run([straw, 'observed', 'VC', normalized, 'chr1', 'chr1', 'BP', 200])
@@ -331,8 +331,13 @@ def main():
                         assert fixture.records(0, 0, 1, unit=1) == expected
                         assert fixture.vectors[0, 'VC', 0, 0, 10][0] == words
                         if x_int and y_int and not floating and dense:
+                            preserved_vectors = fixture.vectors.copy()
+                            preserved_attributes = fixture.attributes.copy()
                             run([v10, 'addnorm', '--no-scale', target])
                             fixture = Hic(target)
+                            assert fixture.attributes == preserved_attributes
+                            for key, value in preserved_vectors.items():
+                                assert fixture.vectors[key] == value
                             assert fixture.vectors[0, 'VC', 0, 1, 1]
                             assert fixture.vectors[0, 'VC_SQRT', 0, 1, 1]
                             assert fixture.vectors[1, None, None, 1, 1]

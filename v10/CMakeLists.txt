@@ -5,7 +5,8 @@ if(NOT V10_ZSTD_INCLUDE_DIR OR NOT V10_ZSTD_LIBRARY)
   message(FATAL_ERROR "BUILD_V10 requires the zstd headers and library")
 endif()
 add_executable(hic_v10
-    main.cpp writer.cpp convert.cpp pre.cpp reader.cpp repack.cpp addnorm.cpp
+    main.cpp writer.cpp convert.cpp pre.cpp reader.cpp repack.cpp vector_updater.cpp vector_import.cpp text_vectors.cpp addnorm.cpp
+    ../v10_large/io.cpp ../v10_large/vectors.cpp
     ../hic_addnorm/scale_norm.cpp
     ../common/genome.cpp ../common/pair_parser.cpp ../common/expected_value.cpp
 )

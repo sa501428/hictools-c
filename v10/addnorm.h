@@ -9,7 +9,7 @@ struct AddNormOptions {
     int minimum_scale_resolution = 0;
     int compression_level = 3;
 };
-// Atomically replaces the V10 file with an equivalent file containing fresh
-// EVI0, NVI0, and NEVI indexes. Matrix blocks and metadata are copied unchanged.
+// Atomically adds missing type/resolution bundles. Existing dictionary IDs,
+// vectors, expected values, and matrix block bytes are preserved.
 void add_norm_v10(const std::string &path, const AddNormOptions &options);
 } // namespace hic10
