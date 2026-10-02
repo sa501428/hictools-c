@@ -43,6 +43,13 @@ if(BUILD_TESTING)
     add_test(NAME v10_additive_normalization
       COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/v10/tests/test_additive_norm.py
               $<TARGET_FILE:hic_v10> $<TARGET_FILE:hic_v10_large>)
+    if(STRAW_TEST_EXECUTABLE)
+      add_test(NAME v10_straw_normalization_import
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/v10/tests/test_straw_norm_import.py
+                ${STRAW_TEST_EXECUTABLE} $<TARGET_FILE:hic_v10> $<TARGET_FILE:hic_v10_large>)
+      set_tests_properties(v10_straw_normalization_import PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    endif()
     add_test(NAME v10_supplied_text_normalization
       COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/v10/tests/test_text_norm.py
               $<TARGET_FILE:hic_v10> $<TARGET_FILE:hic_v10_large>)

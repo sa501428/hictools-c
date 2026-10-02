@@ -92,14 +92,17 @@ def snapshot(h):
     return chunks, blocks, records
 
 
-def preserve(before, after):
+def preserve(before, after, allow_new_attributes=False):
     assert after.norms[:len(before.norms)] == before.norms
     for key, value in before.vectors.items(): assert after.vectors[key] == value, key
     old_chunks, old_blocks, old_records = snapshot(before)
     chunks, blocks, records = snapshot(after)
     assert all(chunk in chunks for chunk in old_chunks)
     assert blocks == old_blocks and records == old_records
-    assert before.attributes == after.attributes
+    if allow_new_attributes:
+        assert after.attributes[:len(before.attributes)] == before.attributes
+    else:
+        assert before.attributes == after.attributes
     assert before.chroms == after.chroms and before.res == after.res
 
 

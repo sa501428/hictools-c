@@ -421,3 +421,10 @@ The integration test covers HBS validation, noncontiguous-pair rejection,
 terminal-endpoint folding, zero counts, counts above `2^53`, shard map/reduce
 resume, duplicate aggregation, streaming rollups, independent V10 decoding,
 normalization task resume, and comparison with the in-memory V10 normalizer.
+
+Normalization text exported by `straw dump-norms source.v9.hic --output-dir norms`
+can be passed directly to `addnorm --norm-file`, one file per normalization.
+Custom names (including `RU` and `NDSCALE`) use the same import path. The optional
+`source-length` directive preserves v9 length differences and surplus bits as
+metadata while storing vectors with legal v10 bin counts. See the
+[shared text format and migration examples](../v10/README.md#supply-normalization-vectors-as-text).

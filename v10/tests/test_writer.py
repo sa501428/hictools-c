@@ -284,14 +284,27 @@ def main():
             assert words[:len(new)] == new[:len(words)]
             if len(words) > len(new): assert any(k.startswith('hictools.v9.vector.') for k, _ in h.attributes)
         if straw:
+            # Keep the endpoint folding/bit preservation assertions above, but
+            # compare direct reader queries on contacts strictly inside the
+            # chromosomes. Legacy terminal bins have no equivalent v10 bin;
+            # their raw counts are folded, while divisors are copied by bin.
+            parity_pairs = p/'reader-parity.txt'
+            parity_pairs.write_text(''.join(f'{a} {x} {b} {y}\n'
+                for a, x, b, y in rows
+                if x < (10000 if a == 'chr1' else 7500)
+                and y < (10000 if b == 'chr1' else 7500)))
+            parity_v9, parity_v10 = p/'parity.v9.hic', p/'parity.v10.hic'
+            run([v9, '-r', '100,200', parity_pairs, parity_v9, chrom])
+            run([addnorm, '--no-scale', parity_v9])
+            run([v10, 'convert', parity_v9, parity_v10])
             for norm in ('NONE', 'VC', 'VC_SQRT'):
                 for res in (100, 200):
-                    left = run([straw, 'observed', norm, original, 'chr1', 'chr1', 'BP', res])
-                    right = run([straw, 'observed', norm, converted, 'chr1', 'chr1', 'BP', res])
+                    left = run([straw, 'observed', norm, parity_v9, 'chr1', 'chr1', 'BP', res])
+                    right = run([straw, 'observed', norm, parity_v10, 'chr1', 'chr1', 'BP', res])
                     assert sorted(left.splitlines()) == sorted(right.splitlines()), (norm, res, left, right)
                     for matrix_type in ('oe', 'expected'):
-                        left = run([straw, matrix_type, norm, original, 'chr1', 'chr1', 'BP', res])
-                        right = run([straw, matrix_type, norm, converted, 'chr1', 'chr1', 'BP', res])
+                        left = run([straw, matrix_type, norm, parity_v9, 'chr1', 'chr1', 'BP', res])
+                        right = run([straw, matrix_type, norm, parity_v10, 'chr1', 'chr1', 'BP', res])
                         left = sorted([line.split() for line in left.splitlines()])
                         right = sorted([line.split() for line in right.splitlines()])
                         assert len(left) == len(right)
@@ -305,7 +318,7 @@ def main():
             # vector's one-short length to the exact V10 bin count.
             reverse_v9 = p/'reverse.v9.hic'
             reverse_v10 = p/'reverse.v10.hic'
-            renamed = original.read_bytes().replace(b'chr1\0', b'chrZ\0').replace(
+            renamed = parity_v9.read_bytes().replace(b'chr1\0', b'chrZ\0').replace(
                 b'chr2\0', b'chrA\0')
             reverse_v9.write_bytes(renamed)
             run([v10, 'convert', reverse_v9, reverse_v10])

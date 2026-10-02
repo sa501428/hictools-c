@@ -22,6 +22,7 @@ using Key = std::tuple<uint32_t, uint32_t, uint8_t, uint32_t>;
 struct Supplied {
     uint8_t unit = 0;
     hic10large::VectorInfo info;
+    std::string source_geometry;
 };
 struct Workspace {
     std::string path;
@@ -34,6 +35,22 @@ struct Workspace {
     }
     ~Workspace() { std::error_code error; std::filesystem::remove_all(path, error); }
 };
+// Comments outside quoted names only; std::quoted also accepts escaped quotes.
+void strip_comment(std::string &line) {
+    bool quoted = false, escaped = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        char c = line[i];
+        if (escaped) { escaped = false; continue; }
+        if (quoted && c == '\\') { escaped = true; continue; }
+        if (c == '"') quoted = !quoted;
+        if (c == '#' && !quoted) { line.resize(i); return; }
+    }
+}
+uint64_t unsigned_integer(const std::string &text) {
+    check(!text.empty() && text.find_first_not_of("0123456789") == std::string::npos,
+          "invalid source vector length " + text);
+    return std::stoull(text);
+}
 uint32_t positive_integer(const std::string &text) {
     check(!text.empty() && text.find_first_not_of("0123456789") == std::string::npos,
           "invalid normalization bin size " + text);
@@ -67,13 +84,13 @@ std::vector<Supplied> parse_vectors(const std::string &path, Header &header,
     std::set<Key> keys;
     std::unique_ptr<hic10large::VectorFileWriter> writer;
     Supplied active;
-    uint64_t count = 0, expected = 0, line_number = 0;
+    uint64_t count = 0, expected = 0, source_expected = 0, line_number = 0;
+    bool source_length = false;
     bool version = false;
     std::string line;
     while (std::getline(input, line)) {
         ++line_number;
-        auto comment = line.find('#');
-        if (comment != std::string::npos) line.resize(comment);
+        strip_comment(line);
         std::istringstream row(line);
         std::string token;
         if (!(row >> token)) continue;
@@ -105,21 +122,36 @@ std::vector<Supplied> parse_vectors(const std::string &path, Header &header,
                 check(keys.insert({active.info.norm, active.info.chr, active.unit, active.info.ri}).second,
                       "duplicate normalization vector");
                 expected = header.bins(active.info.chr, active.unit, active.info.ri);
-                count = 0;
+                count = 0; source_expected = expected; source_length = false;
                 writer.reset(new hic10large::VectorFileWriter(
                     hic10large::join_path(directory, "vector-" + std::to_string(vectors.size()) + ".h10w"), active.info));
+            } else if (token == "source-length") {
+                std::string size, extra;
+                check(writer && count == 0 && !source_length && bool(row >> size) && !(row >> extra),
+                      "source-length requires one integer before vector values");
+                source_expected = unsigned_integer(size); source_length = true;
+                if (source_expected != expected)
+                    active.source_geometry = std::to_string(source_expected) + ":";
             } else if (token == "end") {
                 std::string extra;
                 check(writer && !(row >> extra), "unexpected end or extra fields after end");
-                check(count == expected, "normalization vector length " + std::to_string(count) +
-                      " differs from chromosome bin count " + std::to_string(expected));
+                check(count == source_expected, "normalization vector length " + std::to_string(count) +
+                      " differs from required length " + std::to_string(source_expected));
+                while (count < expected) { writer->add(0x7fc00000); ++count; }
                 active.info = writer->finish(); writer.reset();
                 vectors.push_back(std::move(active));
             } else {
                 check(bool(writer), "value outside a vector block");
                 do {
-                    check(count < expected, "too many values in normalization vector");
-                    writer->add(word(token)); ++count;
+                    check(count < source_expected, "too many values in normalization vector");
+                    uint32_t bits = word(token);
+                    if (count < expected) writer->add(bits);
+                    else {
+                        const char *hex = "0123456789abcdef";
+                        for (unsigned j = 0; j < 8; ++j)
+                            active.source_geometry.push_back(hex[(bits >> (28-4*j)) & 15]);
+                    }
+                    ++count;
                 } while (row >> token);
             }
         } catch (const std::exception &e) {
@@ -163,7 +195,14 @@ void add_text_vectors_v10(const std::string &path, const std::string &text_path,
         if (retained.count(key)) {
             std::cerr << "Preserving existing " << header.norms[v.info.norm] << ' '
                       << (v.unit ? "FRAG " : "BP ") << v.info.resolution << '\n';
-        } else bundles[key].push_back(std::move(v));
+        } else {
+            if (!v.source_geometry.empty()) {
+                header.attributes.emplace_back("hictools.import.vector.0." + std::to_string(v.info.norm) + "." +
+                    std::to_string(v.info.chr) + "." + std::to_string(v.unit) + "." + std::to_string(v.info.ri),
+                    v.source_geometry);
+            }
+            bundles[key].push_back(std::move(v));
+        }
     }
     if (bundles.empty()) return;
     std::set<uint32_t> cis;

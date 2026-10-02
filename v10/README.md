@@ -166,8 +166,9 @@ end
 
 Multiple types, chromosomes, and resolutions can share one text file. One value
 per line is recommended; multiple whitespace-separated values per line are also
-accepted. Blank lines and `#` comments are ignored. Names containing spaces may
-be double-quoted; names containing `#` are not supported in this text format.
+accepted. Blank lines and `#` comments outside quoted names are ignored. Names containing
+spaces or `#` must be double-quoted; quotes and backslashes inside quoted names
+are backslash-escaped.
 Type names are arbitrary except `NONE`. The synthetic `ALL` overview cannot
 receive a supplied vector. BP vectors require exactly
 `ceil(chromosomeLength / binSize)` values; FRAG vectors require exactly
@@ -181,6 +182,40 @@ for unavailable bins. Nonpositive or nonfinite divisors are stored but excluded
 from expected-value calculations. For exact bits (including signed zero or a
 specific NaN payload), use `bits:XXXXXXXX`, for example `bits:7fc01234`.
 Unrepresentable overflow is an error; text values follow float32 rounding.
+
+Straw's C++ CLI can export v9 or v10 normalization vectors directly into this
+format, including arbitrary stored custom types such as `RU` and `NDSCALE`:
+
+```sh
+straw dump-norms source.v9.hic --output-dir norms
+# Or select one type and choose its filename:
+straw dump-norms source.v9.hic --norm RU --output RU.norm.txt
+build/hic_v10 addnorm --norm-file RU.norm.txt completed.v10.hic
+# Both importers accept the same files; import every type additively:
+for vectors in norms/*.norm.txt; do
+  build/hic_v10_large addnorm --norm-file "$vectors" --tmp /local/scratch completed.v10.hic
+done
+```
+
+Each exported file contains one normalization type across all its indexed
+chromosomes, resolutions, and BP/FRAG units, using exact `bits:XXXXXXXX` words.
+`NONE` and the synthetic overview chromosome are omitted. The destination must
+advertise the corresponding chromosome names, units and resolutions. Importing
+vectors recalculates normalized expected arrays from the **destination's raw
+contacts**; it does not copy source expected arrays or source scale factors.
+
+V9 often stores `floor(length/binSize)+1` values, whereas v10 requires the ceiling
+bin count. For a vector whose source count differs from the v10 geometry, straw
+writes `source-length N` immediately after the `vector` line and emits all `N`
+original words. This optional directive explicitly enables length adaptation:
+keep the overlapping bins exact, pad missing bins with `bits:7fc00000`, and keep
+surplus words outside the addressable v10 bins in a header attribute named
+`hictools.import.vector.0.<normId>.<chrId>.<unitId>.<resolutionId>`. Its value is
+`N:` followed by eight hexadecimal digits per surplus word. No original words
+are discarded. The v10 file's header defines the target geometry. Without this
+directive, exact target bin counts remain mandatory. Duplicate/late directives,
+invalid counts, and mismatches between `N` and supplied values are errors.
+Attributes for a skipped existing bundle are not added or overwritten.
 
 For each newly supplied type/unit/resolution bundle, the command calculates a
 full-length NEVI array from the corresponding raw cis contacts divided by the
@@ -382,7 +417,8 @@ validation, sparse/dense V9 variants, FRAG conversion, duplicate attributes,
 normalization bits, exact multi-block indexes, and transactional failures.
 Python uses the system zstd shared library through `ctypes`.
 
-Optionally test V9/V10 query parity with the updated straw executable:
+Optionally test V9/V10 query parity and normalization export/import through
+both v10 addnorm executables with the updated straw executable:
 
 ```sh
 cmake -S . -B build -DBUILD_V10=ON \

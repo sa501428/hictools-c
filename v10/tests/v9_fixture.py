@@ -6,11 +6,12 @@ def p(fmt, *args): return struct.pack('<'+fmt, *args)
 def s(value): return value.encode()+b'\0'
 
 def make(path, x_int=False, y_int=False, floating=False, dense=False, frag=False,
-         endpoint=False):
+         endpoint=False, bp_resolutions=(10,)):
     header = bytearray(b'HIC\0'+p('IQ', 9, 0)+s('fixture'))
     nvi_patch = len(header); header += bytes(16)
     header += p('I', 2)+s('unknown')+s('first')+s('unknown')+s('second')
-    header += p('I', 1)+s('chr1')+p('Q', 20 if endpoint else 80)+p('II', 1, 10)
+    header += p('I', 1)+s('chr1')+p('Q', 20 if endpoint else 80)
+    header += p('I', len(bp_resolutions))+b''.join(p('I', bin) for bin in bp_resolutions)
     header += p('I', int(frag))
     if frag: header += p('I', 1)+p('I', 7)+b''.join(p('I', i) for i in range(5, 66, 10))
     data = header
@@ -45,7 +46,7 @@ def make(path, x_int=False, y_int=False, floating=False, dense=False, frag=False
         raw += b''.join(p('f' if floating else 'h', v) for v in [values[0], float('nan') if floating else -32768, values[1], float('nan') if floating else -32768, values[2], float('nan') if floating else -32768])
         expected = [(0, 0, values[0]), (0, 2, values[1]), (0, 4, values[2])]
     compressed = zlib.compress(raw)
-    units = [('BP', 10)]+([('FRAG', 1)] if frag else [])
+    units = [('BP', bin) for bin in bp_resolutions]+([('FRAG', 1)] if frag else [])
     matrix_pos = len(data)
     meta = bytearray(p('iii', 0, 0, len(units)))
     patches = []
