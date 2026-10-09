@@ -4,6 +4,7 @@
 #include "writer.h"
 #include "normalize.h"
 #include "addnorm.h"
+#include "distributed_addnorm.h"
 #include "v10/norm_selection.h"
 #include "v10/vector_import.h"
 #include "v10/reader.h"
@@ -61,6 +62,14 @@ void usage() {
            "      <file.v10.hic> (calculates normalized expected from supplied divisors)\n"
            "  hic_v10_large addnorm --vectors <vectors.manifest> <file.v10.hic>\n"
            "      Existing vectors and raw blocks are preserved; add-norm is an alias.\n\n"
+           "  hic_v10_large plan-addnorm --norm-file FILE [--norm-file FILE ...]\n"
+           "      [--rows-per-task N] [--norms-per-task N] [--chunks-per-task N] [--level N]\n"
+           "      <file.v10.hic> <work-dir>\n"
+           "  hic_v10_large addnorm-tasks --phase PHASE [--count | --dependencies] <work-dir/addnorm.plan>\n"
+           "  hic_v10_large addnorm-run [--memory SIZE] [--tmp DIR] [--fan-in N]\n"
+           "      <addnorm.plan> <PHASE> <zero-based-task-index>\n"
+           "  hic_v10_large addnorm-assemble [-t N] <work-dir/addnorm.plan>\n"
+           "      PHASE: cells, expected, reduce, compress-norm, compress-expected.\n\n"
            "  hic_v10_large validate-v10 [--matrix CHR1:CHR2:BIN] <file.v10.hic>\n\n"
            "The large-data builder is separate from hic_v10 pre. Stage validates the\n"
            "entire gzip/HBS stream, checks chromosome-pair contiguity, and writes\n"
@@ -259,6 +268,67 @@ int main(int argc, char **argv) {
                 require(options.pair_index == std::numeric_limits<size_t>::max(),
                         "--pair is not valid for merge-pairs");
                 merge_pair_v10(args[0], args[1], args[2], args[3], options);
+            }
+        } else if (command == "plan-addnorm" || command == "addnorm-tasks" ||
+                   command == "addnorm-run" || command == "addnorm-assemble") {
+            AddnormPlanOptions plan_options;
+            NormalizeOptions run_options;
+            std::vector<std::string> args, texts;
+            std::string phase;
+            bool count_only = false, dependencies = false;
+            uint32_t threads = 1;
+            for (int i = 2; i < argc; ++i) {
+                std::string arg = argv[i];
+                auto value = [&]() {
+                    require(i + 1 < argc, "missing value for " + arg);
+                    return std::string(argv[++i]);
+                };
+                if (command == "plan-addnorm" && arg == "--norm-file")
+                    texts.push_back(value());
+                else if (command == "plan-addnorm" && arg == "--rows-per-task")
+                    plan_options.rows_per_task = number32(value(), "rows per task");
+                else if (command == "plan-addnorm" && arg == "--chunks-per-task")
+                    plan_options.chunks_per_task = number32(value(), "chunks per task");
+                else if (command == "plan-addnorm" && arg == "--norms-per-task")
+                    plan_options.norms_per_task = number32(value(), "norms per task");
+                else if (command == "plan-addnorm" && arg == "--level") {
+                    auto text = value();
+                    size_t used = 0;
+                    plan_options.level = std::stoi(text, &used);
+                    require(used == text.size(), "invalid compression level");
+                } else if (command == "addnorm-tasks" && arg == "--phase") {
+                    require(phase.empty(), "duplicate phase");
+                    phase = value();
+                } else if (command == "addnorm-tasks" && arg == "--count")
+                    count_only = true;
+                else if (command == "addnorm-tasks" && arg == "--dependencies")
+                    dependencies = true;
+                else if (command == "addnorm-run" && arg == "--memory")
+                    run_options.memory_bytes = parse_size(value());
+                else if (command == "addnorm-run" && arg == "--tmp")
+                    run_options.temporary_directory = value();
+                else if (command == "addnorm-run" && arg == "--fan-in")
+                    run_options.scale_options.merge_fan_in = number(value());
+                else if (command == "addnorm-assemble" && arg == "-t")
+                    threads = number32(value(), "assembly threads");
+                else {
+                    require(arg.empty() || arg[0] != '-', "unknown option " + arg);
+                    args.push_back(arg);
+                }
+            }
+            if (command == "plan-addnorm") {
+                require(args.size() == 2, "plan-addnorm needs input.hic and work directory");
+                plan_addnorm(args[0], texts, args[1], plan_options);
+            } else if (command == "addnorm-tasks") {
+                require(args.size() == 1 && !phase.empty(),
+                        "addnorm-tasks needs --phase and a plan");
+                print_addnorm_tasks(args[0], phase, count_only, dependencies);
+            } else if (command == "addnorm-run") {
+                require(args.size() == 3, "addnorm-run needs plan, phase, and task index");
+                run_addnorm_task(args[0], args[1], number(args[2]), run_options);
+            } else {
+                require(args.size() == 1, "addnorm-assemble needs a plan");
+                assemble_addnorm(args[0], threads);
             }
         } else if (command == "addnorm" || command == "normalize" || command == "plan-normalize" ||
                    command == "normalize-chr" || command == "expected-res" ||

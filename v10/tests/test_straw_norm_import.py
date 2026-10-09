@@ -8,6 +8,7 @@ sys.dont_write_bytecode = True
 from inspect_v10 import Hic
 from test_additive_norm import run, preserve
 from v9_fixture import make, p, s
+from test_distributed_norm import prepare, execute, equivalent
 
 WEIRD = 'CUSTOM #/ "quoted"'
 
@@ -107,6 +108,16 @@ def main():
                 run([tool, 'addnorm', '--norm-file', bad, path], ok=False)
                 assert path.read_bytes() == saved
         assert outputs[0].vectors == outputs[1].vectors
+        # Import all of the actual v9 straw dumps in one distributed plan.
+        parallel = root/'distributed.hic'; parallel.write_bytes(target.read_bytes())
+        run([regular, 'addnorm', '--norm', 'SCALE', parallel])
+        before = Hic(parallel)
+        plan = prepare(large, parallel, sorted(paths), root/'distributed-work')
+        execute(large, plan)
+        run([large, 'addnorm-assemble', '-t', 4, plan])
+        after = Hic(parallel)
+        preserve(before, after, allow_new_attributes=True)
+        equivalent(outputs[0], after)
     print('Straw normalization import round trip passed')
 
 if __name__ == '__main__': main()

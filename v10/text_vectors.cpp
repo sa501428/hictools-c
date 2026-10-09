@@ -19,11 +19,7 @@ namespace hic10 {
 namespace {
 using Bundle = std::tuple<uint32_t, uint8_t, uint32_t>;
 using Key = std::tuple<uint32_t, uint32_t, uint8_t, uint32_t>;
-struct Supplied {
-    uint8_t unit = 0;
-    hic10large::VectorInfo info;
-    std::string source_geometry;
-};
+using Supplied = SuppliedTextVector;
 struct Workspace {
     std::string path;
     explicit Workspace(const std::string &parent) {
@@ -179,6 +175,10 @@ struct Accumulator {
     }
 };
 } // namespace
+std::vector<SuppliedTextVector> stage_text_vectors(const std::string &path, Header &header,
+                                                   const std::string &directory) {
+    return parse_vectors(path, header, directory);
+}
 void add_text_vectors_v10(const std::string &path, const std::string &text_path,
                          int level, const std::string &temporary_directory,
                          const ExpectedCellStream &stream) {

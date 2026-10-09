@@ -51,6 +51,10 @@ RunInfo extract_cis_run(hic10::Reader &reader, uint32_t chr, uint8_t unit, uint3
     return merged;
 }
 } // namespace
+RunInfo extract_addnorm_cis_run(hic10::Reader &reader, uint32_t chr, uint8_t unit, uint32_t ri,
+                                const std::string &directory, const NormalizeOptions &options) {
+    return extract_cis_run(reader, chr, unit, ri, directory, options);
+}
 void add_text_norm_file(const std::string &path, const std::string &text,
                         const NormalizeOptions &options, int level) {
     require(options.memory_bytes >= 32768, "addnorm sort memory must be at least 32 KiB");

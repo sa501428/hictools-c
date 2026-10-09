@@ -25,7 +25,11 @@ preserving existing normalizations exactly. Select types with `--norm VC`,
 cell runs, without its original build folder. Both tools accept `--vectors` to
 import sidecars for additional normalization types. `--norm-file vectors.txt`
 accepts user-supplied divisors in the documented text format and calculates their
-normalized expected values automatically. See the
+normalized expected values automatically. For Slurm imports of existing straw dumps,
+`hic_v10_large plan-addnorm`, `addnorm-run`, and `addnorm-assemble` distribute
+expected calculations and vector compression; the included
+[Slurm launcher](v10_large/README.md#distributed-import-of-supplied-normalization-vectors)
+submits their job arrays and final assembly. See the
 [V10 documentation](v10/README.md) for details, memory behavior, and legacy
 vector length migration. By default V10 derives 2, 5, 20, 50, 200, 500, and 2,000 bp
 from the standard finer anchors and materializes 500 kb. `--derive` and

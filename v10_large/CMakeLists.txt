@@ -12,6 +12,7 @@ add_executable(hic_v10_large
     vectors.cpp
     normalize.cpp
     addnorm.cpp
+    distributed_addnorm.cpp
     ${PROJECT_SOURCE_DIR}/v10/repack.cpp
     ${PROJECT_SOURCE_DIR}/v10/vector_updater.cpp
     ${PROJECT_SOURCE_DIR}/v10/vector_import.cpp
@@ -33,6 +34,7 @@ set_target_properties(hic_v10_large PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 install(TARGETS hic_v10_large DESTINATION bin)
+install(PROGRAMS ${PROJECT_SOURCE_DIR}/scripts/slurm_addnorm_v10_large.py DESTINATION bin)
 
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter)
@@ -50,6 +52,11 @@ if(BUILD_TESTING)
       set_tests_properties(v10_straw_normalization_import PROPERTIES
         ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     endif()
+    add_test(NAME v10_distributed_text_normalization
+      COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/v10/tests/test_distributed_norm.py
+              $<TARGET_FILE:hic_v10> $<TARGET_FILE:hic_v10_large>)
+    set_tests_properties(v10_distributed_text_normalization PROPERTIES
+      ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     add_test(NAME v10_supplied_text_normalization
       COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/v10/tests/test_text_norm.py
               $<TARGET_FILE:hic_v10> $<TARGET_FILE:hic_v10_large>)

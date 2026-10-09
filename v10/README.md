@@ -134,6 +134,11 @@ Allow disk space for the replacement file as well as any computation workspace.
 
 ### Supply normalization vectors as text
 
+For a completed count file with large imported vector sets, the
+[distributed large-data import](../v10_large/README.md#distributed-import-of-supplied-normalization-vectors)
+accepts multiple straw dumps in one plan and runs expected calculations and
+vector compression across Slurm arrays, followed by parallel chunk assembly.
+
 Use `--norm-file` when the divisors have already been calculated elsewhere and
 you want the tool to calculate the corresponding normalized expected arrays:
 

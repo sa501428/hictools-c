@@ -236,6 +236,148 @@ The large text path streams materialized count blocks and externally sorts and
 rolls up derived targets; it supports BP and FRAG count matrices. Use the regular
 text importer for score matrices. Existing bundles are preserved and skipped.
 
+### Distributed import of supplied normalization vectors
+
+For an already built v10 count file, `plan-addnorm` stages the same text dumps
+accepted by `addnorm --norm-file` and creates independent expected-value and
+compression tasks. It accepts multiple files in one plan, including one straw
+dump per custom type. Neither the original build directory nor HBS input is
+needed. BP and FRAG, materialized and derived resolutions, custom type names,
+exact float32 words, and the `source-length` v9 migration convention all use the
+[existing text contract](../v10/README.md#supply-normalization-vectors-as-text).
+Score matrices are rejected by this large-data import path.
+
+Build with `-DBUILD_V10=ON`. Prepare once on a shared filesystem:
+
+```sh
+# Produce one file per norm type, including custom names such as RU/NDSCALE.
+/path/to/straw dump-norms source.v9.hic --output-dir /shared/norms
+
+build/hic_v10_large plan-addnorm \
+  --norm-file /shared/norms/RU.norm.txt \
+  --norm-file /shared/norms/NDSCALE.norm.txt \
+  --rows-per-task 262144 --norms-per-task 1 --chunks-per-task 16 \
+  /shared/target.v10.hic /shared/addnorm-work
+```
+
+The target's chromosome names, units and advertised resolutions must match the
+supplied vectors. Planning validates the text, stages uncompressed vector words,
+and records the target's identity. Repeating preparation with identical inputs
+and settings reuses the plan; other inputs require a new work directory. Input
+text is no longer needed by workers after preparation. Keep the target unchanged
+until assembly; mutation invalidates the plan.
+
+Use the included Slurm launcher to create the job arrays and final assembly job:
+
+```sh
+python3 scripts/slurm_addnorm_v10_large.py /shared/addnorm-work/addnorm.plan \
+  --hic-v10-large /shared/hictools-c/build/hic_v10_large \
+  --partition compute --account my_account \
+  --job-memory 32G --sort-memory 8GiB --fan-in 64 \
+  --array-batch-size 1000 --max-jobs 100 --assemble-threads 16 --dry-run
+
+# Remove --dry-run to submit the displayed dependency graph.
+```
+
+Paths to the target, executable, and work directory must be visible from every
+node. Python 3 and `sbatch` are needed on the submission host; compute nodes only
+need the executable and Bash. `--tmp /local/scratch` can move cell-extraction
+scratch to node-local storage; durable outputs always go into the shared work
+directory. `--array-batch-size` must fit the cluster's `MaxArraySize`.
+`--cell-array-batch-size` also must fit that limit (default 1).
+`--max-jobs` throttles each array separately; multiple batches/phases can run
+concurrently. The launcher records submitted IDs, dependencies and scripts in
+`slurm-submit/jobs.json`, including successful submissions preceding an error.
+An append-only, synced `jobs.jsonl` journal in the submission folder preserves
+IDs during submission, even if the launcher is killed before its final JSON
+snapshot. Inspect the ledger/journal and stop obsolete pending jobs before an
+explicit `--resubmit`; retries use new script
+paths and retain the previous ledger. `--dry-run` creates scripts but submits no
+jobs and creates no job ledger.
+
+The phases are:
+
+| Phase | Independent work | Required results |
+| --- | --- | --- |
+| `cells` | One chromosome/unit/resolution; extract, externally sort and partition cis contacts by row range | Prepared plan |
+| `compress-norm` | Groups of 64K-word chunks of supplied vectors | Prepared plan; runs alongside `cells` |
+| `expected` | Chromosome row range × group of normalization types | Its `cells` result |
+| `reduce` | One normalization/unit/resolution, or missing raw expected bundle | Its expected partials |
+| `compress-expected` | Groups of 64K-word expected-array chunks | Its `reduce` result |
+| Assembly | One coordinator with parallel chunk copying | All vector and compression results |
+
+The launcher defaults to `--dependency-mode ready`: it submits cell tasks
+individually, releases expected arrays after their particular cell job succeeds,
+then releases each reduction/compression group after its own prerequisite arrays
+succeed. Arrays can run across phase boundaries. Increasing
+`--cell-array-batch-size` batches extraction jobs at the cost of waiting for the
+whole batch; `--dependency-mode phase` enables whole-phase barriers. Each array
+contains tasks sharing prerequisites, with a generated lookup from its zero-based
+Slurm indices to plan task indices. List commands, count tasks, or inspect the
+machine-readable DAG for custom scheduling:
+
+```sh
+build/hic_v10_large addnorm-tasks --phase expected /shared/addnorm-work/addnorm.plan
+build/hic_v10_large addnorm-tasks --phase expected --count /shared/addnorm-work/addnorm.plan
+build/hic_v10_large addnorm-tasks --phase expected --dependencies /shared/addnorm-work/addnorm.plan
+
+# In a corresponding Slurm array, after the required phase has completed:
+build/hic_v10_large addnorm-run /shared/addnorm-work/addnorm.plan expected "$SLURM_ARRAY_TASK_ID"
+
+# Cell workers also accept the sort budget, merge fan-in and scratch location.
+build/hic_v10_large addnorm-run --memory 8GiB --fan-in 64 --tmp /local/scratch \
+  /shared/addnorm-work/addnorm.plan cells "$SLURM_ARRAY_TASK_ID"
+
+# Run after all compression jobs complete; this is the only target writer.
+build/hic_v10_large addnorm-assemble -t 16 /shared/addnorm-work/addnorm.plan
+```
+
+`--dependencies` emits one line per task: its phase-local index followed by
+`phase:index` prerequisites. For example, `3 cells:1` means expected task 3
+requires cell task 1. `--count` and `--dependencies` are mutually exclusive.
+
+Smaller `--rows-per-task` values create more expected jobs. `--norms-per-task 1`
+maximizes independence across types; larger groups reuse each contact read and
+reduce task/file counts. `--chunks-per-task 1` exposes every compression chunk
+as its own job; larger groups amortize scheduler overhead. The defaults are
+1,048,576 rows, one norm per expected task and 64 chunks per compression task.
+`--level` sets Zstandard compression level when planning (default 3).
+
+Expected workers hold a full chromosome-distance accumulator plus a full
+chromosome normalization vector for each grouped type: budget approximately
+`(sizeof(long double) + 4) × chromosome_bins × grouped_types`, plus decoded
+records, manifests and allocator overhead. Reductions hold a full longest
+chromosome-distance accumulator and expected array. Row sharding distributes
+contact processing but does not shrink these arrays. `--sort-memory` only bounds
+cell sort buffers; it does not cap process RSS. Smaller shards also create more
+partial files and reduction I/O. Whole-chromosome extraction/sorting within a
+cell task, global smoothing within a bundle reduction, and final directory/header
+publication still each have a coordinator. New vector
+compression is distributed. Assembly uses up to `-t` threads to copy raw matrix
+ranges, existing vector chunks, and new precompressed chunks to disjoint file
+offsets without recompression; pointer relocation is planned by the coordinator.
+Its matrix-copy buffers add up to about 8 MiB per thread.
+
+All durable result manifests identify their plan/task and contain checksums.
+Successful tasks can be rerun without rewriting their output. Incomplete tasks
+can be rerun; missing, corrupt or mismatched completed artifacts cause an error
+before the target is replaced. After investigating corruption, remove the
+corresponding `.done` marker and rerun that task and any affected downstream
+tasks. Keep the work directory until assembly succeeds. Expected partials are
+summed in a fixed task order, then the shared smoothing/scaling algorithm runs;
+float rounding can differ slightly from the single-process importer.
+
+Assembly stages a complete replacement beside the target and needs space for a
+second `.hic`, in addition to the durable runs, vectors and compressed fragments.
+It preserves raw block bytes, all existing vector chunks, normalization IDs and
+existing expected/scaling values. Existing type/unit/resolution bundles are
+skipped as a whole. Only missing supplied bundles and their expected values are
+added; missing raw expected arrays are also built. Validated completion markers
+make a repeated assembly a no-op, including recovery after replacement. Workers
+never write the target, and concurrent assembly attempts for this workflow are
+locked. This workflow imports supplied divisors; computed VC/VC_SQRT/SCALE from
+raw contacts still use the existing `addnorm`/`normalize` commands.
+
 If sidecars were already computed, attach them without rebuilding raw matrices:
 
 ```sh

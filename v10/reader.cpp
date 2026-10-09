@@ -1,5 +1,7 @@
 #include "reader.h"
 #include <algorithm>
+#include <cerrno>
+#include <unistd.h>
 #include <cmath>
 #include <cstring>
 #include <set>
@@ -194,6 +196,18 @@ Bytes Reader::read_bytes(uint64_t position, uint64_t length) {
     check(fseeko(file_, position, SEEK_SET) == 0, "V10 seek failed");
     check(std::fread(b.data(), 1, b.size(), file_) == b.size(), "V10 short read");
     return b;
+}
+Bytes Reader::read_bytes_at(uint64_t position, uint64_t length) const {
+    check(length <= RECORD_LIMIT && position <= file_size_ && length <= file_size_ - position,
+          "V10 positional interval out of bounds");
+    Bytes bytes(length);
+    for (size_t done = 0; done < bytes.size();) {
+        auto n = pread(fileno(file_), bytes.data() + done, bytes.size() - done, position + done);
+        if (n < 0 && errno == EINTR) continue;
+        check(n > 0, "V10 short positional read");
+        done += n;
+    }
+    return bytes;
 }
 uint64_t Reader::vector_data_start() {
     uint64_t first = footer_.position;

@@ -1,4 +1,8 @@
 #include "repack.h"
+#include "common/thread_pool.h"
+#include <cerrno>
+#include <deque>
+#include <unistd.h>
 #include <algorithm>
 
 namespace hic10 {
@@ -71,7 +75,7 @@ Bytes serialize_header(const Header &header) {
 }
 } // namespace
 
-Bytes repack_matrix_prefix(FILE *output, Reader &reader, const Header &header) {
+Bytes repack_matrix_prefix(FILE *output, Reader &reader, const Header &header, ThreadPool *pool) {
     Bytes new_header = serialize_header(header);
     write_bytes(output, new_header);
 
@@ -79,7 +83,8 @@ Bytes repack_matrix_prefix(FILE *output, Reader &reader, const Header &header) {
     // arbitrary physical ordering, including vectors interleaved with matrices.
     std::vector<FileLocator> intervals;
     auto fields = reader.matrix_relocation_fields(&intervals);
-    std::sort(intervals.begin(), intervals.end(), [](auto a, auto b) { return a.position < b.position; });
+    std::sort(intervals.begin(), intervals.end(),
+              [](auto a, auto b) { return a.position < b.position; });
     std::map<uint64_t, uint64_t> relocated;
     uint64_t previous_end = reader.header_length(), next_output = position(output);
     for (auto interval : intervals) {
@@ -94,26 +99,74 @@ Bytes repack_matrix_prefix(FILE *output, Reader &reader, const Header &header) {
     // independent disk seek/read/write for every block locator in a large file.
     constexpr uint64_t chunk = 8 * 1024 * 1024;
     size_t field_index = 0;
-    for (auto interval : intervals) {
-        for (uint64_t offset = 0; offset < interval.length;) {
-            uint64_t at = interval.position + offset;
-            uint64_t count = std::min(chunk, interval.length - offset);
-            auto end = std::lower_bound(fields.begin() + field_index, fields.end(), at + count);
-            if (end != fields.begin() + field_index && *(end - 1) + 8 > at + count)
-                count = *(end - 1) - at;
-            auto bytes = reader.read_bytes(at, count);
-            while (field_index < fields.size() && fields[field_index] < at + count) {
-                uint64_t field = fields[field_index++];
-                check(field >= at && field - at + 8 <= count,
-                      "V10 relocation field outside copied matrix record");
-                auto found = relocated.find(get_wide(bytes, field - at));
-                check(found != relocated.end(), "V10 matrix locator outside copied storage");
-                set_wide(bytes, field - at, found->second);
+    std::deque<std::future<void>> pending;
+    if (pool)
+        check(std::fflush(output) == 0, "cannot flush repack header");
+    const int fd = fileno(output);
+    try {
+        for (auto interval : intervals) {
+            for (uint64_t offset = 0; offset < interval.length;) {
+                uint64_t at = interval.position + offset;
+                uint64_t count = std::min(chunk, interval.length - offset);
+                auto end = std::lower_bound(fields.begin() + field_index, fields.end(), at + count);
+                if (end != fields.begin() + field_index && *(end - 1) + 8 > at + count)
+                    count = *(end - 1) - at;
+                check(count > 0, "split relocation field outside matrix interval");
+                size_t first = field_index;
+                while (field_index < fields.size() && fields[field_index] < at + count)
+                    ++field_index;
+                size_t last = field_index;
+                uint64_t output_at = relocated.at(interval.position) + offset;
+                auto copy = [&, at, count, first, last, output_at, fd]() {
+                    auto bytes =
+                        pool ? reader.read_bytes_at(at, count) : reader.read_bytes(at, count);
+                    for (size_t j = first; j < last; ++j) {
+                        uint64_t field = fields[j];
+                        check(field >= at && field - at + 8 <= count,
+                              "V10 relocation field outside copied matrix record");
+                        const auto &positions = relocated;
+                        auto found = positions.find(get_wide(bytes, field - at));
+                        check(found != positions.end(),
+                              "V10 matrix locator outside copied storage");
+                        set_wide(bytes, field - at, found->second);
+                    }
+                    if (!pool)
+                        write_bytes(output, bytes);
+                    else
+                        for (size_t done = 0; done < bytes.size();) {
+                            auto n = pwrite(fd, bytes.data() + done, bytes.size() - done,
+                                            output_at + done);
+                            if (n < 0 && errno == EINTR)
+                                continue;
+                            check(n > 0, "cannot copy repacked V10 matrix range");
+                            done += n;
+                        }
+                };
+                if (!pool)
+                    copy();
+                else {
+                    pending.push_back(pool->submit(copy));
+                    if (pending.size() >= pool->num_threads()) {
+                        pending.front().get();
+                        pending.pop_front();
+                    }
+                }
+                offset += count;
             }
-            write_bytes(output, bytes);
-            offset += count;
         }
+        while (!pending.empty()) {
+            pending.front().get();
+            pending.pop_front();
+        }
+    } catch (...) {
+        // Reader, relocation map and output must outlive every scheduled copy.
+        for (auto &task : pending)
+            if (task.valid())
+                task.wait();
+        throw;
     }
+    if (pool)
+        check(fseeko(output, next_output, SEEK_SET) == 0, "cannot seek repacked matrix end");
     check(field_index == fields.size(), "uncopied V10 matrix relocation fields");
 
     Bytes footer = reader.read_bytes(reader.footer().position, reader.footer().length);

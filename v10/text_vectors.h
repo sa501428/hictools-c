@@ -1,10 +1,19 @@
 #pragma once
 #include "reader.h"
+#include "v10_large/vectors.h"
 
 namespace hic10 {
 using ExpectedCellConsumer = std::function<void(uint32_t, uint32_t, long double)>;
 using ExpectedCellStream = std::function<void(Reader &, uint32_t, uint8_t, uint32_t,
                                              const ExpectedCellConsumer &)>;
+struct SuppliedTextVector {
+    uint8_t unit = 0;
+    hic10large::VectorInfo info;
+    std::string source_geometry;
+};
+// Stage validated divisors durably; caller owns directory cleanup/publication.
+std::vector<SuppliedTextVector> stage_text_vectors(const std::string &path, Header &header,
+                                                  const std::string &directory);
 // HIC_NORM_VECTORS 1 text import: exact supplied divisors plus computed NEVI.
 // The default stream uses full chromosome matrices. The large executable
 // supplies a disk-backed derived-resolution stream through the callback.

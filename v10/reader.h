@@ -42,6 +42,8 @@ class Reader {
     const std::array<FileLocator, 3> &vector_indexes() const { return vector_indexes_; }
     const FileLocator &footer() const { return footer_; }
     Bytes read_bytes(uint64_t position, uint64_t length);
+    // Positional reads for parallel copying; does not alter the FILE cursor.
+    Bytes read_bytes_at(uint64_t position, uint64_t length) const;
 
     // First byte occupied by an active vector chunk or vector index. Everything
     // before this point contains the header and matrix section and can be copied
