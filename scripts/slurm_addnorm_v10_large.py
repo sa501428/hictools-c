@@ -5,7 +5,6 @@ Does not submit jobs with --dry-run. Input/planning remain explicit CLI steps.
 The target, staged plan directory, and executable must be visible on nodes.
 """
 import argparse
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -80,13 +79,6 @@ def main(argv=None):
     submit_dir = plan.parent/'slurm-submit'
     logs.mkdir(parents=True, exist_ok=True)
     submit_dir.mkdir(exist_ok=True)
-    # Hold a local/shared-filesystem lock for the complete submission so two
-    # launchers cannot both pass the ledger check and create duplicate DAGs.
-    submit_lock = (submit_dir/'submit.lock').open('a')
-    try:
-        fcntl.flock(submit_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        parser.error('another launcher is submitting this plan')
     ledger = submit_dir/'jobs.json'
     if ledger.exists() and not args.resubmit:
         parser.error(f'{ledger} already exists; inspect it and use --resubmit only when retries are intended')
@@ -98,23 +90,30 @@ def main(argv=None):
     journal_path = run_dir/'jobs.jsonl'
     journal = journal_path.open('w') if not args.dry_run else None
 
-    def save_ledger(status):
+    def save_ledger(status, exclusive=False):
         if args.dry_run:
             return
-        temporary = ledger.with_suffix('.tmp')
-        with temporary.open('w') as output:
+        temporary = ledger if exclusive else ledger.with_suffix('.tmp')
+        try:
+            output = temporary.open('x' if exclusive else 'w')
+        except FileExistsError:
+            parser.error(f'{ledger} already exists; another launcher reserved this plan')
+        with output:
             json.dump({'plan': str(plan), 'jobs': job_records, 'journal': str(journal_path),
                        'status': status}, output, indent=2)
             output.write('\n')
             output.flush()
             os.fsync(output.fileno())
-        temporary.replace(ledger)
+        if not exclusive:
+            temporary.replace(ledger)
         shutil.copy2(ledger, run_dir/'jobs.json')
 
     # Reserve the ledger before any scheduler calls. Each accepted job is
     # appended/fsynced in O(1) journal writes; a final snapshot avoids O(N²)
     # rewriting of a potentially large dependency graph during submission.
-    save_ledger('submitting')
+    # Exclusive creation prevents racing first-time submissions. An explicit
+    # resubmission must be made only after the previous launcher/jobs stop.
+    save_ledger('submitting', exclusive=not args.resubmit)
 
     def submit(phase, command, dependencies, array=None, tasks=None):
         nonlocal serial

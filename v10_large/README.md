@@ -358,6 +358,20 @@ ranges, existing vector chunks, and new precompressed chunks to disjoint file
 offsets without recompression; pointer relocation is planned by the coordinator.
 Its matrix-copy buffers add up to about 8 MiB per thread.
 
+Slurm owns scheduling: exactly one active job may execute each phase/task index
+in a plan, and exactly one assembly job may publish to a given target. Workers
+write separate artifacts; the distributed workflow does not use `flock` or
+other advisory locks. Use the same single-owner rule for manual task scheduling.
+Stop the old submission and launcher before resubmitting, and never overlap
+worker generations or assembly jobs for the same target. Legacy `.lock` files
+can be left in place and are ignored.
+
+First-time launchers reserve `slurm-submit/jobs.json` with exclusive file
+creation, so two simultaneous first submissions cannot both schedule jobs.
+`--resubmit` deliberately replaces an existing ledger after retaining its
+history; run only one resubmission launcher. Assembly still verifies the input
+identity before publishing and atomically replaces the target after completion.
+
 All durable result manifests identify their plan/task and contain checksums.
 Successful tasks can be rerun without rewriting their output. Incomplete tasks
 can be rerun; missing, corrupt or mismatched completed artifacts cause an error
@@ -374,8 +388,7 @@ existing expected/scaling values. Existing type/unit/resolution bundles are
 skipped as a whole. Only missing supplied bundles and their expected values are
 added; missing raw expected arrays are also built. Validated completion markers
 make a repeated assembly a no-op, including recovery after replacement. Workers
-never write the target, and concurrent assembly attempts for this workflow are
-locked. This workflow imports supplied divisors; computed VC/VC_SQRT/SCALE from
+never write the target; final publication belongs to the single assembly job. This workflow imports supplied divisors; computed VC/VC_SQRT/SCALE from
 raw contacts still use the existing `addnorm`/`normalize` commands.
 
 If sidecars were already computed, attach them without rebuilding raw matrices:

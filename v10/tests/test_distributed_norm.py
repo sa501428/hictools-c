@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 sys.dont_write_bytecode = True
 from inspect_v10 import Hic
 from test_text_norm import source, block, floats
@@ -87,12 +88,14 @@ def mock_slurm(root, tool, plan):
             '--assemble-threads', '3']
     run([*args, '--dry-run'])
     assert not (plan.parent/'slurm-submit/jobs.json').exists()
+    assert not (plan.parent/'slurm-submit/submit.lock').exists()
     run(args)
     ledger = plan.parent/'slurm-submit/jobs.json'
     saved = ledger.read_bytes()
     run(args, ok=False)
     assert ledger.read_bytes() == saved
     assert json.loads(saved)['status'] == 'submitted'
+    assert not (plan.parent/'slurm-submit/submit.lock').exists()
     jobs = json.loads(saved)['jobs']; seen = set()
     journal = Path(json.loads(saved)['journal'])
     assert [json.loads(line) for line in journal.read_text().splitlines()] == jobs
@@ -150,6 +153,26 @@ def mock_slurm(root, tool, plan):
     run([sys.executable, script, failed_plan, '--hic-v10-large', tool,
          '--sbatch', failing], ok=False)
     assert failing.with_suffix('.counter').read_text()=='2'
+    # Exclusive ledger creation replaces the submission flock: racing first
+    # launchers must still create exactly one dependency graph.
+    target = root/'racing-submit.hic'; target.write_bytes((root/'base.hic').read_bytes())
+    racing_plan = prepare(tool, target, [root/'RU.norm.txt'], root/'racing-submit-work')
+    barrier = threading.Barrier(2)
+    def launch():
+        barrier.wait()
+        return subprocess.run([sys.executable, script, racing_plan, '--hic-v10-large', tool,
+                               '--sbatch', sbatch], text=True, capture_output=True)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: launch(), range(2)))
+    assert sorted(r.returncode for r in results) == [0, 2], [(r.stdout, r.stderr) for r in results]
+    assert 'already exists' in next(r.stderr for r in results if r.returncode)
+    ledger = json.loads((racing_plan.parent/'slurm-submit/jobs.json').read_text())
+    assert ledger['status'] == 'submitted'
+    for name in PHASES:
+        tasks = [i for j in ledger['jobs'] if j['phase']==name for i in (j['tasks'] or [])]
+        assert sorted(tasks) == list(range(count(tool, racing_plan, name)))
+    assert not (racing_plan.parent/'slurm-submit/submit.lock').exists()
+
 
 
 
@@ -195,6 +218,9 @@ def main():
             partial.write_bytes(original)
             phase(large, plan, 'reduce')
             phase(large, plan, 'compress-expected')
+            # No phase, including failed assembly attempts, acquires locks.
+            assert not list(directory.glob('*.lock'))
+            assert not list(root.glob('*.distributed-addnorm.lock'))
             snapshot = {p: p.read_bytes() for p in directory.glob('*.done')}
             for name in PHASES: phase(large, plan, name)
             assert snapshot == {p: p.read_bytes() for p in directory.glob('*.done')}
@@ -233,7 +259,11 @@ def main():
         target = root/'staged.hic'; target.write_bytes(base.read_bytes())
         gone = root/'gone.txt'; gone.write_bytes(first.read_bytes())
         plan = prepare(large, target, [gone], root/'staged-work'); gone.unlink()
-        execute(large, plan); run([large, 'addnorm-assemble', plan])
+        # Legacy lock files have no role in scheduler-owned execution.
+        (plan.parent/'cells-0.done.lock').touch()
+        execute(large, plan)
+        assert {p.name for p in plan.parent.glob('*.lock')} == {'cells-0.done.lock'}
+        run([large, 'addnorm-assemble', plan])
         after = Hic(target); preserve(Hic(base), after)
         for key, value in reference.vectors.items():
             if key[0] == 0 and key[1] == 'RU': assert after.vectors[key] == value

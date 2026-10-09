@@ -17,8 +17,6 @@
 #include <set>
 #include <sstream>
 #include <tuple>
-#include <fcntl.h>
-#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zstd.h>
@@ -74,18 +72,6 @@ void end(std::istream &in) {
     std::string tag;
     require(bool(in >> tag) && tag == "end" && !(in >> tag), "truncated/trailing task manifest");
 }
-struct Lock {
-    int fd;
-    explicit Lock(const std::string &path) {
-        fd = open((path + ".lock").c_str(), O_CREAT | O_RDWR, 0600);
-        require(fd >= 0, "cannot create task lock");
-        if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-            close(fd);
-            fail("task is already running: " + path);
-        }
-    }
-    ~Lock() { close(fd); }
-};
 struct Scratch {
     std::string path;
     explicit Scratch(const std::string &parent) {
@@ -466,7 +452,6 @@ std::vector<RunInfo> cell_results(const Plan &p, size_t id) {
 void cells(Plan &p, size_t id, const NormalizeOptions &options) {
     const auto &task = p.cells.at(id);
     auto done = p.path("cells-" + std::to_string(id) + ".done");
-    Lock lock(done);
     if (path_exists(done)) {
         for (auto r : cell_results(p, id))
             inspect_run(r.path, true);
@@ -589,7 +574,6 @@ void expected(Plan &p, size_t id) {
     const auto &task = p.expected.at(id);
     const auto &c = p.cells[task.cell];
     auto done = p.path("expected-" + std::to_string(id) + ".done");
-    Lock lock(done);
     if (path_exists(done)) {
         for (auto item : expected_results(p, id)) {
             auto path = hist_path(p, id, item.first);
@@ -684,7 +668,6 @@ Slot slot_result(const Plan &p, size_t id) {
 void reduce(Plan &p, size_t b) {
     auto id = p.supplied.size() + b;
     auto done = vector_done(p, id);
-    Lock lock(done);
     if (path_exists(done)) {
         auto s = slot_result(p, id);
         require(chunk_hashes(s.info) == s.hashes, "expected sidecar checksum mismatch");
@@ -788,7 +771,6 @@ std::vector<StoredVectorChunk> compression_result(const Plan &p, size_t id) {
 void compress(Plan &p, size_t id) {
     const auto &task = p.compression.at(id);
     auto done = p.path("compressed-" + std::to_string(id) + ".done");
-    Lock lock(done);
     auto slot = slot_result(p, task.slot);
     if (path_exists(done)) {
         File input(pack_path(p, id), "rb");
@@ -1031,6 +1013,8 @@ void print_addnorm_tasks(const std::string &path, const std::string &phase, bool
         std::cout << "hic_v10_large addnorm-run " << shell_quote(fs::absolute(path).string()) << ' '
                   << phase << ' ' << ordinal << '\n';
 }
+// The scheduler assigns one active owner to each phase/task ordinal. Workers
+// write distinct artifacts; Slurm schedules one final publisher for the target.
 void run_addnorm_task(const std::string &path, const std::string &phase, uint64_t ordinal,
                       const NormalizeOptions &options) {
     auto p = read_plan(path);
@@ -1049,8 +1033,6 @@ void run_addnorm_task(const std::string &path, const std::string &phase, uint64_
 void assemble_addnorm(const std::string &path, uint32_t threads) {
     require(threads > 0, "assembly threads must be positive");
     auto initial = read_plan(path, false);
-    Lock plan_lock(initial.path("assemble"));
-    Lock target_lock(initial.source + ".distributed-addnorm");
     if (completed(initial)) {
         std::cerr << "Distributed addnorm already assembled\n";
         return;
