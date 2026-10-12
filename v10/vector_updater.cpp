@@ -115,7 +115,7 @@ class VectorOutputImpl {
 
   public:
     VectorOutputImpl(Reader &reader, const Header &header, const std::string &path, int level,
-                     uint32_t threads)
+                     uint32_t threads, Reader *extra)
         : target_(path), level_(level), header_(header), threads_(threads) {
         check(threads > 0, "vector copy thread count must be positive");
         if (threads > 1)
@@ -141,7 +141,7 @@ class VectorOutputImpl {
             check(false, "cannot open addnorm temporary file");
         }
         try {
-            footer_bytes_ = repack_matrix_prefix(file_, reader, header, pool_.get());
+            footer_bytes_ = repack_matrix_prefix(file_, reader, header, pool_.get(), extra);
             preserve_vectors(reader);
         } catch (...) {
             std::fclose(file_);
@@ -396,8 +396,8 @@ class VectorOutputImpl {
     }
 };
 
-VectorOutput::VectorOutput(Reader &r, const Header &h, const std::string &path, int level, uint32_t threads)
-    : impl_(new VectorOutputImpl(r, h, path, level, threads)) {}
+VectorOutput::VectorOutput(Reader &r, const Header &h, const std::string &path, int level, uint32_t threads, Reader *extra)
+    : impl_(new VectorOutputImpl(r, h, path, level, threads, extra)) {}
 VectorOutput::~VectorOutput() = default;
 bool VectorOutput::contains(uint8_t kind, uint32_t norm, uint32_t chr, uint8_t unit, uint32_t ri) const {
     return impl_->contains(kind, norm, chr, unit, ri);

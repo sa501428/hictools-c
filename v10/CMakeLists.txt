@@ -5,7 +5,7 @@ if(NOT V10_ZSTD_INCLUDE_DIR OR NOT V10_ZSTD_LIBRARY)
   message(FATAL_ERROR "BUILD_V10 requires the zstd headers and library")
 endif()
 add_executable(hic_v10
-    main.cpp writer.cpp convert.cpp pre.cpp reader.cpp repack.cpp vector_updater.cpp vector_import.cpp text_vectors.cpp addnorm.cpp
+    main.cpp all.cpp writer.cpp convert.cpp pre.cpp reader.cpp repack.cpp vector_updater.cpp vector_import.cpp text_vectors.cpp addnorm.cpp
     ../v10_large/io.cpp ../v10_large/vectors.cpp
     ../hic_addnorm/scale_norm.cpp
     ../common/genome.cpp ../common/pair_parser.cpp ../common/expected_value.cpp
@@ -14,6 +14,7 @@ target_include_directories(hic_v10 PRIVATE ${PROJECT_SOURCE_DIR} ${V10_ZSTD_INCL
 target_link_libraries(hic_v10 PRIVATE ${V10_ZSTD_LIBRARY} ZLIB::ZLIB Threads::Threads m)
 set_target_properties(hic_v10 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 install(TARGETS hic_v10 DESTINATION bin)
+install(PROGRAMS ${PROJECT_SOURCE_DIR}/scripts/add_all_v10.py DESTINATION bin)
 
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter)

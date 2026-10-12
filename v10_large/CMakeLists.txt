@@ -13,6 +13,8 @@ add_executable(hic_v10_large
     normalize.cpp
     addnorm.cpp
     distributed_addnorm.cpp
+    ${PROJECT_SOURCE_DIR}/v10/all.cpp
+    ${PROJECT_SOURCE_DIR}/v10/writer.cpp
     ${PROJECT_SOURCE_DIR}/v10/repack.cpp
     ${PROJECT_SOURCE_DIR}/v10/vector_updater.cpp
     ${PROJECT_SOURCE_DIR}/v10/vector_import.cpp
@@ -39,6 +41,9 @@ install(PROGRAMS ${PROJECT_SOURCE_DIR}/scripts/slurm_addnorm_v10_large.py DESTIN
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
+    add_test(NAME v10_scaled_all
+      COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/v10/tests/test_all.py
+              $<TARGET_FILE:hic_v10> $<TARGET_FILE:hic_v10_large>)
     add_test(NAME v10_large_stage_and_rollup
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_large.py
               $<TARGET_FILE:hic_v10_large> $<TARGET_FILE:hic_v10>)

@@ -75,9 +75,7 @@ Bytes serialize_header(const Header &header) {
 }
 } // namespace
 
-Bytes repack_matrix_prefix(FILE *output, Reader &reader, const Header &header, ThreadPool *pool) {
-    Bytes new_header = serialize_header(header);
-    write_bytes(output, new_header);
+Bytes copy_matrix_storage(FILE *output, Reader &reader, ThreadPool *pool) {
 
     // Copy only referenced matrix records, indexes, and blocks. V10 permits
     // arbitrary physical ordering, including vectors interleaved with matrices.
@@ -181,6 +179,24 @@ Bytes repack_matrix_prefix(FILE *output, Reader &reader, const Header &header, T
         auto found = relocated.find(get_wide(footer, field));
         check(found != relocated.end(), "V10 footer locator outside copied storage");
         set_wide(footer, field, found->second);
+    }
+    return footer;
+}
+Bytes repack_matrix_prefix(FILE *output, Reader &reader, const Header &header, ThreadPool *pool,
+                           Reader *extra) {
+    write_bytes(output, serialize_header(header));
+    Bytes footer = copy_matrix_storage(output, reader, pool);
+    if (extra) {
+        Bytes added = copy_matrix_storage(output, *extra, pool);
+        uint32_t old_count = get_word(footer, 16), new_count = get_word(added, 16);
+        // Extra pairs are appended after all original chromosome IDs.
+        if (old_count && new_count)
+            check(get_word(footer, footer.size() - 24) < get_word(added, 24),
+                  "appended matrix directory is not sorted");
+        footer.insert(footer.end(), added.begin() + 24, added.end());
+        set_wide(footer, 8, footer.size());
+        uint32_t count = narrow(uint64_t(old_count) + new_count);
+        for (unsigned i = 0; i < 4; ++i) footer[16 + i] = count >> (8 * i);
     }
     return footer;
 }

@@ -44,6 +44,8 @@ void usage() {
            "      <parts-dir> <pair-id>\n"
            "  hic_v10_large merge-pairs [--vectors vectors.manifest] [-t N] [--level N]\n"
            "      <stage.manifest> <build.manifest> <parts-dir> <output.hic>\n\n"
+           "  Final write/merge overview options: --no-all, --all-bins N (default 500),\n"
+           "      --all-source-resolution N (default 2500000). All is enabled by default.\n\n"
            "  hic_v10_large normalize [--memory SIZE] [--tmp DIR] [-t N] [--fan-in N]\n"
            "      [--no-vc] [--no-vc-sqrt] [--no-scale] [--no-warm-start]\n"
            "      [--cache-rollups] [--warm-vc-exponent N]\n"
@@ -227,7 +229,10 @@ int main(int argc, char **argv) {
                     require(i + 1 < argc, "missing value for " + arg);
                     return std::string(argv[++i]);
                 };
-                if (arg == "--genome") options.genome = value();
+                if (arg == "--no-all") options.include_all = false;
+                else if (arg == "--all-bins") options.all_bins = number32(value(), "All bins");
+                else if (arg == "--all-source-resolution") options.all_source = number32(value(), "All source resolution");
+                else if (arg == "--genome") options.genome = value();
                 else if (arg == "--memory") options.memory_bytes = parse_size(value());
                 else if (arg == "--tmp") options.temporary_directory = value();
                 else if (arg == "--vectors") options.vector_manifest = value();

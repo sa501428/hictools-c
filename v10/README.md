@@ -82,8 +82,8 @@ through the parser, spool, and checked cell aggregation. Its chromosome table is
 matched by name and length. Requested resolutions must be multiples of the
 embedded BP resolution. See [the HBS specification](../HBS_FORMAT.md).
 
-Direct V10 preprocessing writes real chromosomes only, without the legacy
-synthetic `ALL` overview. It generates raw expected vectors using the existing
+Direct V10 preprocessing appends a stored scaled `All` overview by default.
+Use `--no-all` to omit it. It generates raw expected vectors using the existing
 expected-value calculation, extending unavailable terminal distances with NaNs.
 It does not compute normalization vectors during preprocessing. Add them to the
 completed V10 file with the separate V10 implementation:
@@ -430,3 +430,49 @@ cmake -S . -B build -DBUILD_V10=ON \
   -DSTRAW_TEST_EXECUTABLE=/path/to/straw
 ctest --test-dir build --output-on-failure
 ```
+
+
+## Stored All and add-All repair
+
+All is a small ordinary chromosome at the finest advertised BP resolution.
+For example, a file with finest bin 100 stores its useful All overview at
+synthetic bin 100; it does not add 1 bp to the global resolution list. The other
+All levels contain valid aggregates and usually collapse to a few bins. All/chrN
+pairs are absent and therefore zero. Real chromosome indices stay unchanged.
+
+The default maximum overview width is 500 bins and preferred source resolution
+is 2.5 Mb. `--all-bins 1250` retains approximately the native human 2.5 Mb grid;
+`--all-source-resolution N` chooses a different source preference. The repair
+reader selects a stored materialized anchor no coarser than the preference.
+The actual bin count can be below the requested budget because source bins are
+grouped by an integer factor. Source data are raw, unnormalized, canonical cis
+and trans cells, and integer counts are summed exactly. No All normalization
+vectors or expected scale factors are generated.
+
+```sh
+build/hic_v10 pre --all-bins 500 --all-source-resolution 2500000 \
+  input.pairs output.v10.hic hg38
+
+# Repair from existing map data; no original pairs or HBS required.
+build/hic_v10 add-all input.v10.hic with-all.v10.hic
+build/hic_v10 add-all --in-place input.v10.hic
+python3 scripts/add_all_v10.py --hic-v10 build/hic_v10 input.v10.hic with-all.v10.hic
+```
+
+The standalone repair command accepts V10 input. Convert V9 first with
+`hic_v10 convert`; conversion preserves existing legacy All and adds scaled All
+when All is absent, unless `--no-all` is supplied. Existing usable All is
+preserved; an All header without its matrix is reported as an error.
+
+Repair writes a validated replacement atomically, copying original compressed
+blocks and vector chunks with their exact contents and relocating absolute
+pointers. Allow space and copy time for the entire replacement file. Native
+preprocessing collects All from prepared coarse matrices before finalization,
+so new files do not require a second whole-file copy. For conversion lacking
+All, the current implementation performs the repair after conversion.
+
+The `hicAll.*` attributes record physical layout separately from synthetic
+coordinates. See [the convention](../../hic-format/ScaledAllOverview.md).
+Readers that do not interpret these attributes can decode the matrices but
+need updating for correct All zoom selection and chromosome boundary display.
+Regression coverage is `v10/tests/test_all.py` / CTest `v10_scaled_all`.

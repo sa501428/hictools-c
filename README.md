@@ -374,3 +374,11 @@ new_code/
   are accumulated together, avoiding a redundant scan of large MND files.
 - **No external reader dependency**: `hic_addnorm` includes its own lightweight
   block decompressor; it does not depend on straw or libcurl.
+
+
+V10 producers now include a stored scaled All overview by default, with
+`--no-all` available on preprocessing and final large assembly. Repair existing
+V10 maps with `hic_v10 add-all INPUT OUTPUT` or `scripts/add_all_v10.py`; this
+uses coarse contacts in the map and does not need original reads or HBS.
+See [V10 All construction and repair](v10/README.md#stored-all-and-add-all-repair)
+and [large assembly](v10_large/README.md#default-stored-all-overview).

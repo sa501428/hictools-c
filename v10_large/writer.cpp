@@ -7,6 +7,7 @@
 #include "sort.h"
 #include "vectors.h"
 #include "v10/format.h"
+#include "v10/all.h"
 #include "v10/reader.h"
 #include <algorithm>
 #include <array>
@@ -1081,6 +1082,29 @@ void write_footer(Output &output, std::vector<MatrixEntry> matrices) {
     output.patch(16, locator);
 }
 
+void append_all_matrix(Output &output, std::vector<MatrixEntry> &matrices,
+                       const hic10::Header &header, const hic10::AllBuilder &all,
+                       const WriteOptions &options, const std::string &directory) {
+    std::string pattern = directory + "/all-matrix-XXXXXX";
+    std::vector<char> name(pattern.begin(), pattern.end()); name.push_back(0);
+    int fd = mkstemp(name.data()); require(fd >= 0, "cannot create All matrix temporary");
+    close(fd);
+    RemovePath cleanup(name.data());
+    hic10::Options small;
+    small.level = options.compression_level; small.threads = options.threads;
+    small.verifyDerived = false;
+    for (const auto &r : header.resolutions[0]) {
+        if (r.mode) small.derived.emplace_back(r.bin, header.resolutions[0][r.source].bin);
+        else small.materialized.push_back(r.bin);
+    }
+    { hic10::Writer writer(name.data(), header, small); all.write(writer); writer.finish({}); }
+    hic10::Reader fragment(name.data());
+    auto loc = fragment.matrix_location({all.index(), all.index()});
+    uint64_t begin = fragment.header_length(), end = fragment.footer().position;
+    uint64_t at = output.position();
+    copy_relocated_matrix(name.data(), fragment, output, begin, end, at);
+    matrices.push_back({all.index(), all.index(), at + loc.position - begin, loc.length});
+}
 } // namespace
 
 void write_v10(const std::string &stage_path, const std::string &build_path,
@@ -1107,6 +1131,9 @@ void write_v10(const std::string &stage_path, const std::string &build_path,
 
     WriterState state = prepare_writer_state(stage, build, options);
     hic10::Header &header = state.header;
+    std::unique_ptr<hic10::AllBuilder> all;
+    if (options.include_all && options.pair_index == std::numeric_limits<size_t>::max())
+        all.reset(new hic10::AllBuilder(header, {options.all_bins, options.all_source}));
 
     Output output(output_path, make_header(header));
     std::unique_ptr<ThreadPool> compression_pool(
@@ -1128,6 +1155,13 @@ void write_v10(const std::string &stage_path, const std::string &build_path,
         std::cerr << "Writing V10 matrix " << stage.chromosomes[a].name << " x "
                   << stage.chromosomes[b].name << "\n";
         const bool rotated = a == b;
+        if (all && !build.root_only) {
+            auto found = build.cells.find(std::make_tuple(a, b, all->source()));
+            require(found != build.cells.end(), "build manifest is missing All source resolution");
+            const auto &run = found->second;
+            RunReader coarse(run); CellRecord c;
+            while (coarse.next(c)) all->add(a, b, c.x, c.y, run.resolution, c.count);
+        }
         auto publish = [&](uint32_t ri, std::pair<uint64_t, uint64_t> statistics,
                            BlockBuild block_build) {
             const auto &resolution = header.resolutions[0][ri];
@@ -1244,6 +1278,7 @@ void write_v10(const std::string &stage_path, const std::string &build_path,
             RunReader input(root);
             CellRecord cell;
             while (input.next(cell)) {
+                if (all && begin == 0) all->add(a, b, cell.x, cell.y, root.resolution, cell.count);
                 for (auto &pipeline : blocks) {
                     if (pipeline.rollup)
                         pipeline.rollup->accept(cell, [&](const CellRecord &rolled) {
@@ -1274,6 +1309,7 @@ void write_v10(const std::string &stage_path, const std::string &build_path,
             }
         }
     }
+    if (all) append_all_matrix(output, matrices, header, *all, options, temporary_directory);
     if (!options.vector_manifest.empty())
         write_vectors(output, header, state.vectors, options.compression_level,
                       compression_pool.get(), options.threads);
@@ -1369,6 +1405,9 @@ void merge_pair_v10(const std::string &stage_path, const std::string &build_path
         final_header.norms = vectors.norms;
     }
 
+    std::unique_ptr<hic10::AllBuilder> all;
+    if (options.include_all)
+        all.reset(new hic10::AllBuilder(final_header, {options.all_bins, options.all_source}));
     Output output(output_path, make_header(final_header));
     std::vector<MatrixEntry> matrices;
     matrices.reserve(stage.pairs.size());
@@ -1397,6 +1436,7 @@ void merge_pair_v10(const std::string &stage_path, const std::string &build_path
         require(matrix.position >= old_begin && matrix.position <= old_end &&
                     matrix.length <= old_end - matrix.position,
                 "pair fragment matrix descriptor lies outside matrix section");
+        if (all) all->collect(fragment);
         copy_relocated_matrix(path, fragment, output, old_begin, old_end, new_begin);
         matrices.push_back({expected.chr1, expected.chr2,
                             new_begin + (matrix.position - old_begin), matrix.length});
@@ -1406,6 +1446,7 @@ void merge_pair_v10(const std::string &stage_path, const std::string &build_path
 
     std::unique_ptr<ThreadPool> compression_pool(
         options.threads > 1 ? new ThreadPool(static_cast<size_t>(options.threads)) : nullptr);
+    if (all) append_all_matrix(output, matrices, final_header, *all, options, parts_directory);
     if (!options.vector_manifest.empty())
         write_vectors(output, final_header, vectors, options.compression_level,
                       compression_pool.get(), options.threads);

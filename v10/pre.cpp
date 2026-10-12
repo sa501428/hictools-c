@@ -1,4 +1,5 @@
 #include "pre.h"
+#include "all.h"
 #include "common/thread_pool.h"
 #include "common/expected_value.h"
 #include "common/little_endian.h"
@@ -213,8 +214,7 @@ void pre(const std::string &input, const std::string &output, const std::string 
     Header h;
     h.genome = p.genome.empty() && Genome::is_builtin(genomeSpec) ? genomeSpec : p.genome;
     h.attributes = {{"software", "hictools-c hic_v10"}, {"hicFileScaling", "1.0"}};
-    // V10 has no special whole-genome coordinate system. The direct producer
-    // advertises real chromosomes only; conversion preserves legacy All data.
+    // Real chromosomes retain their original indices; scaled All is appended.
     for (auto c : genome.chromosomes_without_all())
         h.chromosomes.push_back({c->name, static_cast<uint64_t>(c->length), {}});
     auto resolutions = p.resolutions;
@@ -240,6 +240,9 @@ void pre(const std::string &input, const std::string &output, const std::string 
     // Direct preprocessing defines derived targets by exact source aggregation;
     // unlike V9 conversion, there is no pre-existing target matrix to verify.
     writerOptions.verifyDerived = false;
+    apply_resolution_policy(h, writerOptions);
+    std::unique_ptr<AllBuilder> all;
+    if (options.includeAll) all.reset(new AllBuilder(h, {options.allBins, options.allSource}));
     Writer writer(output, h, writerOptions, pool);
     const auto matrixResolutions = writer.header().resolutions[0];
     auto iterator = open_pair_iterator(input, genome, p.format);
@@ -267,7 +270,7 @@ void pre(const std::string &input, const std::string &output, const std::string 
                      genome.at(prepared.chr1 + 1).name.c_str(),
                      genome.at(prepared.chr2 + 1).name.c_str(),
                      static_cast<unsigned long long>(prepared.records));
-        writer.matrix(prepared.chr1, prepared.chr2, [&](uint8_t unit, uint32_t ri) {
+        auto load = [&](uint8_t unit, uint32_t ri) {
             check(!unit && ri < prepared.ranges.size(), "direct pre supports BP only");
             const auto range = prepared.ranges[ri];
             check(range.cells <= std::numeric_limits<size_t>::max(),
@@ -284,7 +287,13 @@ void pre(const std::string &input, const std::string &output, const std::string 
                     {x, y, read_u64(matrices.get(), "truncated prepared matrix spool")});
             }
             return matrix;
-        });
+        };
+        if (all) {
+            Matrix coarse = load(0, h.resolution(0, all->source()));
+            for (const auto &c : coarse.cells)
+                all->add(prepared.chr1, prepared.chr2, c.x, c.y, all->source(), c.value, coarse.scores);
+        }
+        writer.matrix(prepared.chr1, prepared.chr2, load);
     };
 
     auto submit = [&]() {
@@ -381,6 +390,7 @@ void pre(const std::string &input, const std::string &output, const std::string 
                     v.scales.emplace(scale.first - 1, bits(scale.second));
                 vectors.push_back(std::move(v));
             }
+    if (all) all->write(writer);
     writer.finish(vectors);
     std::fprintf(stderr, "V10 complete: %llu / %llu pairs retained\n",
                  static_cast<unsigned long long>(kept), static_cast<unsigned long long>(total));

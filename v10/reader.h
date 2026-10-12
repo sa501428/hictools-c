@@ -55,8 +55,9 @@ class Reader {
     std::vector<uint64_t> matrix_relocation_fields(std::vector<FileLocator> *storage = nullptr);
     std::vector<VectorEntry> vector_entries();
     // Decode one materialized block at a time, without retaining a full matrix.
+    // With allow_scores, Cell.value contains the stored f32 word for score matrices.
     void stream_materialized(uint32_t chr1, uint32_t chr2, uint8_t unit, uint32_t ri,
-                             const std::function<void(const Cell &)> &emit);
+                             const std::function<void(const Cell &)> &emit, bool allow_scores = false);
 
     // Returns canonical cells (x <= y for cis). Derived resolutions are summed
     // exactly from their declared materialized source before conversion to float.

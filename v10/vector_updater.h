@@ -14,7 +14,7 @@ struct StoredVectorChunk {
 class VectorOutput {
   public:
     VectorOutput(Reader &reader, const Header &header, const std::string &path, int level,
-                 uint32_t threads = 1);
+                 uint32_t threads = 1, Reader *extra = nullptr);
     ~VectorOutput();
     bool contains(uint8_t kind, uint32_t norm, uint32_t chr, uint8_t unit, uint32_t ri) const;
     void add(const Vector &vector);

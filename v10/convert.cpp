@@ -1,4 +1,5 @@
 #include "format.h"
+#include "all.h"
 #include "common/thread_pool.h"
 #include <algorithm>
 #include <cerrno>
@@ -769,6 +770,7 @@ void convert(const std::string &input, const std::string &output, const Options 
         while (!pending.empty())
             consume();
         writer.finish(vectors);
+        if (options.includeAll) add_all(output, output, {options.allBins, options.allSource}, options.level, options.threads);
     } catch (...) {
         std::fprintf(stderr,
                      "Staged output kept at %s; rerun the same command to resume"

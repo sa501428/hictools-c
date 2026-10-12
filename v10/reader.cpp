@@ -514,10 +514,10 @@ Matrix Reader::materialized(MatrixKey key, const Zoom &z,
     return result;
 }
 void Reader::stream_materialized(uint32_t chr1, uint32_t chr2, uint8_t unit, uint32_t ri,
-                                 const std::function<void(const Cell &)> &emit) {
+                                 const std::function<void(const Cell &)> &emit, bool allow_scores) {
     for (const auto &z : metadata({chr1, chr2}).zooms)
         if (z.unit == unit && z.resolution == ri) {
-            check(!z.mode && !z.type, "cell streaming requires materialized COUNT_UINT data; use hic_v10 for scores");
+            check(!z.mode && (!z.type || allow_scores), "cell streaming requires materialized COUNT_UINT data; use hic_v10 for scores");
             materialized({chr1, chr2}, z, emit);
             return;
         }

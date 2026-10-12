@@ -1,4 +1,5 @@
 #include "addnorm.h"
+#include "all.h"
 #include "norm_selection.h"
 #include "vector_import.h"
 #include "text_vectors.h"
@@ -14,6 +15,12 @@ static void usage() {
            "  hic_v10 pre [options] <pairs> <output.hic> <chrom.sizes|genome-id>\n"
            "  hic_v10 convert [options] <input.v9.hic> <output.v10.hic>\n"
            "  hic_v10 addnorm [options] <file.v10.hic> (also: add-norm)\n\n"
+           "  hic_v10 add-all [options] <input.v10.hic> <output.v10.hic>\n"
+           "  hic_v10 add-all --in-place [options] <file.v10.hic>\n\n"
+           "All overview options (pre/convert/add-all):\n"
+           "  --no-all          Omit new All during pre/convert (existing All is preserved)\n"
+           "  --all-bins N      Maximum overview width, 1..4096 (default 500)\n"
+           "  --all-source-resolution N  Preferred coarse BP source (default 2500000)\n\n"
            "Common options:\n"
            "  --level N          Zstandard compression level (default 6)\n"
            "\nPre/convert writer options:\n"
@@ -70,12 +77,12 @@ int main(int argc, char **argv) {
             usage();
             return 0;
         }
-        hic10::check(command == "pre" || command == "convert" || command == "addnorm",
-                     "subcommand must be pre, convert, or addnorm");
+        hic10::check(command == "pre" || command == "convert" || command == "addnorm" || command == "add-all",
+                     "subcommand must be pre, convert, addnorm, or add-all");
         hic10::Options opts;
         hic10::PreOptions pre;
         hic10::AddNormOptions addnorm;
-        bool norm_selected = false;
+        bool norm_selected = false, in_place = false;
         std::string vector_manifest, norm_file, norm_tmp = "/tmp";
         std::vector<std::string> args;
         for (int i = 2; i < argc; ++i) {
@@ -88,7 +95,12 @@ int main(int argc, char **argv) {
                 usage();
                 return 0;
             }
-            if (command != "addnorm" && arg == "--scores")
+            if (arg == "--no-all" && (command == "pre" || command == "convert"))
+                opts.includeAll = false;
+            else if (arg == "--all-bins" && command != "addnorm") opts.allBins = number(value());
+            else if (arg == "--all-source-resolution" && command != "addnorm") opts.allSource = number(value());
+            else if (arg == "--in-place" && command == "add-all") in_place = true;
+            else if ((command == "pre" || command == "convert") && arg == "--scores")
                 opts.scores = true;
             else if (command == "convert" && arg == "--no-resume")
                 opts.resume = false;
@@ -104,23 +116,23 @@ int main(int argc, char **argv) {
                 opts.level = std::stoi(s, &n);
                 hic10::check(n == s.size(), "invalid compression level");
                 addnorm.compression_level = opts.level;
-            } else if (command != "addnorm" && arg == "--block-bins") {
+            } else if ((command == "pre" || command == "convert") && arg == "--block-bins") {
                 opts.blockBins = number(value());
             }
-            else if (command != "addnorm" && arg == "--derive") {
+            else if ((command == "pre" || command == "convert") && arg == "--derive") {
                 auto s = value();
                 auto colon = s.find(':');
                 hic10::check(colon != std::string::npos, "--derive needs target:source");
                 opts.derived.emplace_back(number(s.substr(0, colon)), number(s.substr(colon + 1)));
-            } else if (command != "addnorm" && arg == "--materialize") {
+            } else if ((command == "pre" || command == "convert") && arg == "--materialize") {
                 opts.materialized.push_back(number(value()));
-            } else if (command != "addnorm" && arg == "-T") {
+            } else if ((command == "pre" || command == "convert") && arg == "-T") {
                 auto directory = value();
                 if (command == "pre")
                     pre.tmpDir = directory;
                 else
                     opts.tmpDir = directory;
-            } else if (command != "addnorm" && arg == "--read-ahead") {
+            } else if ((command == "pre" || command == "convert") && arg == "--read-ahead") {
                 auto n = number(value());
                 hic10::check(n > 0 && n <= 256,
                              "read-ahead count must be between 1 and 256");
@@ -191,10 +203,13 @@ int main(int argc, char **argv) {
                 args.push_back(arg);
             }
         }
-        size_t wanted = command == "pre" ? 3 : command == "convert" ? 2 : 1;
+        size_t wanted = command == "pre" ? 3 : command == "convert" ? 2 : command == "add-all" ? (in_place ? 1 : 2) : 1;
         hic10::check(args.size() == wanted,
                      "incorrect positional arguments (see --help)");
-        if (command == "pre")
+        if (command == "add-all")
+            hic10::add_all(args[0], in_place ? args[0] : args[1],
+                           {opts.allBins, opts.allSource}, opts.level, opts.threads);
+        else if (command == "pre")
             hic10::pre(args[0], args[1], args[2], opts, pre);
         else if (command == "convert")
             hic10::convert(args[0], args[1], opts);

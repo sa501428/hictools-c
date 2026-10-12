@@ -231,6 +231,8 @@ struct Options {
     std::vector<std::pair<uint32_t, uint32_t>> derived;
     std::vector<uint32_t> materialized;
     bool scores = false, verifyDerived = true;
+    bool includeAll = true;
+    uint32_t allBins = 500, allSource = 2500000;
     // Resumable staging. When stagingPath is set the writer builds the output at
     // that fixed path beside the destination and journals every chromosome pair
     // it has made durable, so an interrupted run restarts at the first pair it
@@ -240,6 +242,8 @@ struct Options {
     std::string stagingPath, resumeKey;
     bool resume = true;
 };
+void apply_resolution_policy(Header &header, const Options &options);
+
 class Writer {
   public:
     Writer(const std::string &output, Header header, const Options &options,

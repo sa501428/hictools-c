@@ -583,3 +583,38 @@ Custom names (including `RU` and `NDSCALE`) use the same import path. The option
 `source-length` directive preserves v9 length differences and surplus bits as
 metadata while storing vectors with legal v10 bin counts. See the
 [shared text format and migration examples](../v10/README.md#supply-normalization-vectors-as-text).
+
+
+## Default stored All overview
+
+`write` and `merge-pairs` append a small scaled All/All matrix by default, at
+the finest advertised BP resolution. Real chromosome IDs, resolution policies,
+and normalization manifests stay unchanged. All-to-real pairs are omitted.
+The useful All level represents a coarse genome-wide overview in synthetic
+coordinates; `hicAll.*` attributes record its physical source and boundaries.
+
+These final-assembly commands accept `--no-all`, `--all-bins N` (default 500,
+maximum 4096), and `--all-source-resolution N` (default 2500000). All options
+belong on the final `write` or `merge-pairs` invocation. Pair fragments contain
+only real chromosome pairs and are reusable across these overview choices;
+All is assembled once by the coordinator rather than duplicated by workers.
+When scripting Slurm jobs, pass the chosen options to the final merge job.
+
+Normal assembly reads each retained coarse materialized run. Root-only assembly
+collects during its first existing root-cell pass, with bounded overview memory.
+Distributed merge collects from each fragment's coarse stored matrix and
+appends only the small All matrix; real block payloads remain unchanged.
+Neither native path recopies an already finished whole file to add All.
+
+```sh
+build/hic_v10_large write --all-bins 500 --all-source-resolution 2500000 \
+  stage/stage.manifest cells/build.manifest output.v10.hic
+build/hic_v10_large merge-pairs --no-all \
+  stage/stage.manifest cells/build.manifest parts output-without-all.v10.hic
+```
+
+Existing files can be repaired with `hic_v10 add-all INPUT OUTPUT`, or the
+`scripts/add_all_v10.py` wrapper, without HBS input. Repair requires a full-file
+replacement copy; fresh assembly does not. See the
+[scaled All convention](../../hic-format/ScaledAllOverview.md) and
+[regular V10 repair documentation](../v10/README.md#stored-all-and-add-all-repair).

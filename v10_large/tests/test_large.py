@@ -180,7 +180,7 @@ def main():
                 assert merged_hic.records(*pair, resolution) == \
                        hic.records(*pair, resolution)
         validated = run([executable, "validate-v10", "--matrix", "0:0:1", merged])
-        assert "matrices\t3" in validated.stdout
+        assert "matrices\t4" in validated.stdout
         assert "matrix\t0\t0\t1\t3" in validated.stdout
 
         # Low-scratch mode retains only the finest cells. Writer and

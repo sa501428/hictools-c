@@ -15,5 +15,5 @@ namespace hic10 {
 // written; the caller writes vector data/indexes before appending it.
 // A supplied pool copies matrix ranges concurrently to disjoint output offsets.
 Bytes repack_matrix_prefix(FILE *output, Reader &reader, const Header &header,
-                           ThreadPool *pool = nullptr);
+                           ThreadPool *pool = nullptr, Reader *extra = nullptr);
 } // namespace hic10
