@@ -17,6 +17,12 @@ class ThreadPool;
 
 namespace hic10 {
 using Bytes = std::vector<uint8_t>;
+// Index streaming can visit hundreds of millions of entries. Avoid creating
+// temporary std::strings for successful checks with literal error messages.
+inline void check(bool condition, const char *message) {
+    if (!condition)
+        throw std::runtime_error(std::string("V10: ") + message);
+}
 inline void check(bool condition, const std::string &message) {
     if (!condition)
         throw std::runtime_error("V10: " + message);

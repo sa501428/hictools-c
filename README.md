@@ -382,3 +382,5 @@ V10 maps with `hic_v10 add-all INPUT OUTPUT` or `scripts/add_all_v10.py`; this
 uses coarse contacts in the map and does not need original reads or HBS.
 See [V10 All construction and repair](v10/README.md#stored-all-and-add-all-repair)
 and [large assembly](v10_large/README.md#default-stored-all-overview).
+For large existing files, use the [Slurm All repair launcher](v10/SlurmAddAll.md)
+with metadata/disk preflight and bounded copy/index buffers.

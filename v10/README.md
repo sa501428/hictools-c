@@ -476,3 +476,13 @@ coordinates. See [the convention](../../hic-format/ScaledAllOverview.md).
 Readers that do not interpret these attributes can decode the matrices but
 need updating for correct All zoom selection and chromosome boundary display.
 Regression coverage is `v10/tests/test_all.py` / CTest `v10_scaled_all`.
+
+Large-file repair uses a parallel body copy with a constant offset shift and
+streamed pointer updates, avoiding per-block relocation tables. Block indexes
+are processed in 1 MiB batches, including indexes larger than 512 MiB. The old
+body and obsolete footer bytes are retained; output is approximately the
+original size plus All and a new footer. For 100G/150G Slurm jobs, metadata/disk
+preflight, submission scripts, runtime estimates and recovery instructions, see
+[repair on Slurm](SlurmAddAll.md). This operation uses `hic_v10 add-all` for both
+ordinary and large files; it does not change the resource behavior of other
+commands. Additional regression coverage is CTest `v10_all_cluster`.

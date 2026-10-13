@@ -21,6 +21,7 @@ static void usage() {
            "  --no-all          Omit new All during pre/convert (existing All is preserved)\n"
            "  --all-bins N      Maximum overview width, 1..4096 (default 500)\n"
            "  --all-source-resolution N  Preferred coarse BP source (default 2500000)\n\n"
+           "  -t N               Parallel add-all copy workers, 1..256 (default 4)\n\n"
            "Common options:\n"
            "  --level N          Zstandard compression level (default 6)\n"
            "\nPre/convert writer options:\n"

@@ -84,6 +84,7 @@ Bytes decompress(Cursor &c, uint32_t output) {
 Reader::Reader(const std::string &path) {
     file_ = std::fopen(path.c_str(), "rb");
     check(file_ != nullptr, "cannot open V10 input: " + path);
+    check(fstat(fileno(file_), &source_stat_) == 0, "cannot stat V10 input");
     check(fseeko(file_, 0, SEEK_END) == 0, "cannot seek V10 input");
     auto end = ftello(file_);
     check(end >= 0, "cannot size V10 input");
@@ -184,6 +185,23 @@ Reader::~Reader() {
     if (file_)
         std::fclose(file_);
 }
+void Reader::assert_unchanged() const {
+    struct stat now{};
+    check(fstat(fileno(file_), &now) == 0, "cannot restat V10 input");
+#ifdef __APPLE__
+    bool same_times = now.st_mtimespec.tv_sec == source_stat_.st_mtimespec.tv_sec &&
+        now.st_mtimespec.tv_nsec == source_stat_.st_mtimespec.tv_nsec &&
+        now.st_ctimespec.tv_sec == source_stat_.st_ctimespec.tv_sec &&
+        now.st_ctimespec.tv_nsec == source_stat_.st_ctimespec.tv_nsec;
+#else
+    bool same_times = now.st_mtim.tv_sec == source_stat_.st_mtim.tv_sec &&
+        now.st_mtim.tv_nsec == source_stat_.st_mtim.tv_nsec &&
+        now.st_ctim.tv_sec == source_stat_.st_ctim.tv_sec &&
+        now.st_ctim.tv_nsec == source_stat_.st_ctim.tv_nsec;
+#endif
+    check(now.st_size == source_stat_.st_size && same_times,
+          "V10 input changed during repair; output will not be published");
+}
 FileLocator Reader::matrix_location(MatrixKey key) const {
     auto found = matrix_locations_.find(key);
     check(found != matrix_locations_.end(), "missing V10 matrix");
@@ -262,38 +280,82 @@ uint64_t Reader::vector_data_start() {
     check(first >= 88 && first <= footer_.position, "invalid V10 vector section order");
     return first;
 }
+void Reader::block_index_batches(const Zoom &z,
+        const std::function<void(uint64_t, Bytes &)> &emit) {
+    if (!z.block_index.length) return;
+    auto prefix = read_bytes(z.block_index.position, 24);
+    Cursor h(prefix); h.magic4("H10I");
+    check(h.word() == 2 && h.wide() == z.block_index.length,
+          "V10 block index mismatch");
+    uint32_t blocks = h.word(); h.zero(4);
+    check(blocks == z.blocks && z.block_index.length == 24 + uint64_t(blocks) * 16 &&
+          z.block_index.position <= file_size_ &&
+          z.block_index.length <= file_size_ - z.block_index.position,
+          "invalid V10 block index length");
+    constexpr uint32_t batch_entries = 65536; // 1 MiB, independent of index length.
+    uint32_t previous = 0;
+    for (uint64_t first = 0; first < blocks; first += batch_entries) {
+        uint64_t at = z.block_index.position + 24 + first * 16;
+        auto bytes = read_bytes(at, std::min<uint64_t>(batch_entries, blocks - first) * 16);
+        Cursor c(bytes);
+        for (uint64_t i = first; c.left(); ++i) {
+            uint32_t number = c.word(), length = c.word();
+            uint64_t pos = c.wide();
+            check(!i || number > previous, "unordered V10 block index");
+            previous = number;
+            check(length >= 16 && pos >= header_length_ && pos <= file_size_ &&
+                  length <= file_size_ - pos, "invalid V10 block interval");
+        }
+        emit(at, bytes);
+    }
+}
+void Reader::validate_matrix_storage() {
+    for (auto key : matrix_keys_)
+        for (const auto &z : metadata(key).zooms)
+            block_index_batches(z, [](uint64_t, Bytes &) {});
+}
+void Reader::relocate_matrix_pointers(uint64_t delta,
+        const std::function<void(uint64_t, const Bytes &)> &write) {
+    auto shift = [&](Bytes &bytes, size_t at) {
+        Cursor c(bytes.data() + at, 8);
+        uint64_t target = c.wide();
+        check(target >= header_length_ && target < file_size_, "invalid V10 relocation target");
+        uint64_t value = plus(target, delta);
+        for (unsigned j = 0; j < 8; ++j) bytes[at + j] = value >> (8 * j);
+    };
+    for (auto key : matrix_keys_) {
+        auto loc = matrix_location(key);
+        auto bytes = read_bytes(loc.position, loc.length);
+        const auto &meta = metadata(key);
+        for (const auto &z : meta.zooms) {
+            if (!z.block_index.length) continue;
+            shift(bytes, z.block_index_position_field - loc.position);
+            block_index_batches(z, [&](uint64_t at, Bytes &batch) {
+                for (size_t i = 8; i < batch.size(); i += 16) shift(batch, i);
+                write(plus(at, delta), batch);
+            });
+        }
+        write(plus(loc.position, delta), bytes);
+    }
+}
 std::vector<uint64_t> Reader::matrix_relocation_fields(std::vector<FileLocator> *storage) {
     std::vector<uint64_t> fields;
     for (auto key : matrix_keys_) {
         const auto &meta = metadata(key);
         if (storage) storage->push_back(matrix_location(key));
         for (const auto &z : meta.zooms) {
-            if (!z.block_index.length)
-                continue;
+            if (!z.block_index.length) continue;
             fields.push_back(z.block_index_position_field);
             if (storage) storage->push_back(z.block_index);
-            auto bytes = read_bytes(z.block_index.position, z.block_index.length);
-            Cursor c(bytes);
-            c.magic4("H10I");
-            check(c.word() == 2 && c.wide() == z.block_index.length,
-                  "V10 block index mismatch");
-            uint32_t blocks = c.word();
-            c.zero(4);
-            check(blocks == z.blocks && z.block_index.length == 24 + uint64_t(blocks) * 16,
-                  "invalid V10 block index length");
-            uint32_t previous = 0;
-            for (uint32_t i = 0; i < blocks; ++i) {
-                uint32_t number = c.word();
-                check(!i || number > previous, "unordered V10 block index");
-                previous = number;
-                uint32_t length = c.word();
-                fields.push_back(z.block_index.position + c.at);
-                uint64_t position = c.wide();
-                check(length >= 16 && position <= file_size_ && length <= file_size_ - position,
-                      "invalid V10 block interval");
-                if (storage) storage->push_back({position, length});
-            }
-            c.done();
+            block_index_batches(z, [&](uint64_t at, Bytes &bytes) {
+                Cursor c(bytes);
+                while (c.left()) {
+                    c.word(); uint32_t length = c.word();
+                    fields.push_back(at + c.at);
+                    uint64_t pos = c.wide();
+                    if (storage) storage->push_back({pos, length});
+                }
+            });
         }
     }
     std::sort(fields.begin(), fields.end());
@@ -368,25 +430,12 @@ Matrix Reader::materialized(MatrixKey key, const Zoom &z,
     result.scores = z.type != 0;
     if (!z.blocks)
         return result;
-    auto index = read_bytes(z.block_index.position, z.block_index.length);
-    Cursor c(index);
-    c.magic4("H10I");
-    check(c.word() == 2 && c.wide() == z.block_index.length,
-          "V10 block index mismatch");
-    uint32_t blockCount = c.word();
-    c.zero(4);
-    check(blockCount == z.blocks &&
-              z.block_index.length == 24 + uint64_t(blockCount) * 16,
-          "invalid V10 block index length");
-    uint32_t previous = 0;
     uint64_t total_emitted = 0;
-    for (uint32_t i = 0; i < blockCount; ++i) {
-        uint32_t number = c.word();
-        check(!i || number > previous, "unordered V10 block index");
-        previous = number;
-        uint32_t storedBytes = c.word();
+    block_index_batches(z, [&](uint64_t, Bytes &index) {
+      Cursor c(index);
+      while (c.left()) {
+        uint32_t number = c.word(), storedBytes = c.word();
         uint64_t position = c.wide();
-        check(storedBytes >= 16, "invalid V10 stored block length");
         auto stored = read_bytes(position, storedBytes);
         Cursor record(stored);
         record.magic4("H10B");
@@ -507,6 +556,7 @@ Matrix Reader::materialized(MatrixKey key, const Zoom &z,
         total_emitted = plus(total_emitted, emitted);
     }
     c.done();
+    });
     check(total_emitted == z.occupied, "V10 matrix occupancy mismatch");
     std::sort(result.cells.begin(), result.cells.end(), [](auto a, auto b) {
         return std::tie(a.y, a.x) < std::tie(b.y, b.x);
@@ -524,23 +574,28 @@ void Reader::stream_materialized(uint32_t chr1, uint32_t chr2, uint8_t unit, uin
     check(false, "missing V10 materialized resolution");
 }
 
-std::vector<VectorEntry> Reader::vector_entries() {
-    std::vector<VectorEntry> result;
+void Reader::for_each_vector_entry(const std::function<void(uint64_t, VectorEntry)> &emit) {
     for (uint8_t kind = 0; kind < 3; ++kind) {
         auto loc = vector_indexes_[kind];
         if (!loc.length) continue;
-        auto bytes = read_bytes(loc.position, loc.length);
-        Cursor c(bytes);
+        check(loc.position <= file_size_ && loc.length >= 16 && loc.length <= file_size_ - loc.position,
+              "invalid V10 vector index interval");
+        auto prefix = read_bytes(loc.position, 16);
+        Cursor c(prefix);
         c.magic4(kind == 0 ? "NVI0" : kind == 1 ? "EVI0" : "NEVI");
         check(c.word() == 1, "unsupported V10 vector index version");
         uint32_t count = c.word();
         c.zero(4);
         std::tuple<uint32_t, uint32_t, uint8_t, uint32_t> previous;
+        uint64_t next_entry = 16;
         for (uint32_t i = 0; i < count; ++i) {
-            size_t start = c.at;
-            uint32_t length = c.word();
-            check(length >= 4, "invalid V10 vector entry length");
-            Cursor e = c.take(length - 4);
+            check(next_entry <= loc.length && loc.length - next_entry >= 4, "truncated V10 vector entry");
+            auto size_bytes = read_bytes(loc.position + next_entry, 4);
+            Cursor size_cursor(size_bytes);
+            uint32_t length = size_cursor.word();
+            check(length >= 4 && length <= loc.length - next_entry, "invalid V10 vector entry length");
+            auto bytes = read_bytes(loc.position + next_entry, length);
+            Cursor e(bytes.data() + 4, length - 4);
             VectorEntry v;
             v.kind = kind;
             if (kind != 1) {
@@ -593,11 +648,16 @@ std::vector<VectorEntry> Reader::vector_entries() {
             e.done();
             auto key = std::make_tuple(v.norm, v.chr, v.unit, v.ri);
             check(!i || previous < key, "unordered or duplicate V10 vector key"); previous = key;
-            v.bytes.assign(bytes.begin() + start, bytes.begin() + start + length);
-            result.push_back(std::move(v));
+            v.bytes = std::move(bytes);
+            emit(loc.position + next_entry, std::move(v));
+            next_entry += length;
         }
-        c.done();
+        check(next_entry == loc.length, "trailing V10 vector index bytes");
     }
+}
+std::vector<VectorEntry> Reader::vector_entries() {
+    std::vector<VectorEntry> result;
+    for_each_vector_entry([&](uint64_t, VectorEntry v) { result.push_back(std::move(v)); });
     return result;
 }
 

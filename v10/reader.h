@@ -7,6 +7,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include <sys/stat.h>
 
 namespace hic10 {
 struct FileLocator {
@@ -44,6 +45,7 @@ class Reader {
     Bytes read_bytes(uint64_t position, uint64_t length);
     // Positional reads for parallel copying; does not alter the FILE cursor.
     Bytes read_bytes_at(uint64_t position, uint64_t length) const;
+    void assert_unchanged() const;
 
     // First byte occupied by an active vector chunk or vector index. Everything
     // before this point contains the header and matrix section and can be copied
@@ -54,6 +56,11 @@ class Reader {
     // that section. Optionally returns the referenced matrix storage intervals.
     std::vector<uint64_t> matrix_relocation_fields(std::vector<FileLocator> *storage = nullptr);
     std::vector<VectorEntry> vector_entries();
+    // Stream indexes independently of total block count (1 MiB batches).
+    void validate_matrix_storage();
+    void relocate_matrix_pointers(uint64_t delta,
+        const std::function<void(uint64_t, const Bytes &)> &write);
+    void for_each_vector_entry(const std::function<void(uint64_t, VectorEntry)> &emit);
     // Decode one materialized block at a time, without retaining a full matrix.
     // With allow_scores, Cell.value contains the stored f32 word for score matrices.
     void stream_materialized(uint32_t chr1, uint32_t chr2, uint8_t unit, uint32_t ri,
@@ -77,6 +84,7 @@ class Reader {
     };
 
     FILE *file_ = nullptr;
+    struct stat source_stat_{};
     uint64_t file_size_ = 0, header_length_ = 0;
     Header header_;
     FileLocator footer_;
@@ -86,6 +94,8 @@ class Reader {
     std::vector<MatrixKey> matrix_keys_;
 
     const MatrixMeta &metadata(MatrixKey key);
+    void block_index_batches(const Zoom &zoom,
+        const std::function<void(uint64_t, Bytes &)> &emit);
     Matrix materialized(MatrixKey key, const Zoom &zoom,
                         const std::function<void(const Cell &)> &emit = {});
 };

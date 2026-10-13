@@ -4,6 +4,9 @@
 #include <deque>
 #include <unistd.h>
 #include <algorithm>
+#include <chrono>
+#include <iostream>
+#include <sys/stat.h>
 
 namespace hic10 {
 namespace {
@@ -199,5 +202,117 @@ Bytes repack_matrix_prefix(FILE *output, Reader &reader, const Header &header, T
         for (unsigned i = 0; i < 4; ++i) footer[16 + i] = count >> (8 * i);
     }
     return footer;
+}
+void append_matrix_atomic(Reader &reader, const Header &header, const std::string &path,
+                          uint32_t threads, Reader *extra,
+                          const std::function<void(const std::string &)> &validate) {
+    check(threads > 0 && threads <= 256, "All repair copy threads must be 1..256");
+    std::string pattern = path + ".add-all.XXXXXX";
+    std::vector<char> name(pattern.begin(), pattern.end()); name.push_back(0);
+    int fd = mkstemp(name.data());
+    check(fd >= 0, "cannot create All repair temporary file");
+    struct Cleanup {
+        std::string path;
+        FILE *file = nullptr;
+        ~Cleanup() { if (file) std::fclose(file); if (!path.empty()) std::remove(path.c_str()); }
+    } cleanup{name.data(), nullptr};
+    struct stat target{};
+    if (stat(path.c_str(), &target) == 0 && fchmod(fd, target.st_mode & 07777) != 0) {
+        close(fd); check(false, "cannot preserve All repair output permissions");
+    }
+    cleanup.file = fdopen(fd, "w+b");
+    if (!cleanup.file) { close(fd); check(false, "cannot open All repair temporary file"); }
+    FILE *output = cleanup.file;
+    auto bytes = serialize_header(header);
+    check(bytes.size() >= reader.header_length(), "All repair cannot shrink the header");
+    uint64_t delta = bytes.size() - reader.header_length();
+    uint64_t end = plus(reader.file_size(), delta);
+    check(end <= uint64_t(INT64_MAX), "All repair output exceeds signed 64-bit file offsets");
+    auto write_at = [&](uint64_t at, const Bytes &data) {
+        check(at <= uint64_t(INT64_MAX) && data.size() <= uint64_t(INT64_MAX) - at,
+              "All repair output offset overflow");
+        for (size_t done = 0; done < data.size();) {
+            auto n = pwrite(fd, data.data() + done, data.size() - done, at + done);
+            if (n < 0 && errno == EINTR) continue;
+            check(n > 0, "cannot write All repair output (check space/quota)");
+            done += n;
+        }
+    };
+    write_at(0, bytes);
+    constexpr uint64_t chunk = 8 * 1024 * 1024;
+    uint64_t start = reader.header_length(), copied = 0;
+    auto begun = std::chrono::steady_clock::now(), last = begun;
+    std::cerr << "All repair: copying " << reader.file_size() - start
+              << " bytes with " << threads << " workers; no per-block relocation map\n";
+    {
+        ThreadPool pool(threads);
+        std::deque<std::pair<std::future<void>, uint64_t>> pending;
+        auto finish_one = [&]() {
+            pending.front().first.get(); copied += pending.front().second; pending.pop_front();
+            auto now = std::chrono::steady_clock::now();
+            if (now - last >= std::chrono::seconds(30)) {
+                double seconds = std::chrono::duration<double>(now - begun).count();
+                std::cerr << "All repair: copied " << copied << '/' << reader.file_size() - start
+                          << " bytes, " << copied / seconds / 1e6 << " MB/s\n";
+                last = now;
+            }
+        };
+        // pool is destroyed (joining all workers) before captures/output on any exception.
+        for (uint64_t at = start; at < reader.file_size();) {
+            uint64_t count = std::min(chunk, reader.file_size() - at);
+            pending.emplace_back(pool.submit([&, at, count]() {
+                auto data = reader.read_bytes_at(at, count);
+                write_at(plus(at, delta), data);
+            }), count);
+            if (pending.size() >= threads) finish_one();
+            at += count;
+        }
+        while (!pending.empty()) finish_one();
+    }
+    std::cerr << "All repair: streaming matrix and vector pointer updates\n";
+    reader.relocate_matrix_pointers(delta, write_at);
+    reader.for_each_vector_entry([&](uint64_t at, VectorEntry v) {
+        for (uint32_t j = 0; j < v.chunks; ++j) {
+            size_t field = v.descriptors + uint64_t(j) * 32 + 16;
+            set_wide(v.bytes, field, plus(get_wide(v.bytes, field), delta));
+        }
+        write_at(plus(at, delta), v.bytes);
+    });
+    auto footer = reader.read_bytes(reader.footer().position, reader.footer().length);
+    for (size_t field = 32; field < footer.size(); field += 24)
+        set_wide(footer, field, plus(get_wide(footer, field), delta));
+    check(fseeko(output, end, SEEK_SET) == 0, "cannot seek appended All matrix");
+    if (extra) {
+        auto added = copy_matrix_storage(output, *extra, nullptr);
+        uint32_t old_count = get_word(footer, 16), new_count = get_word(added, 16);
+        if (old_count && new_count)
+            check(get_word(footer, footer.size() - 24) < get_word(added, 24),
+                  "appended All matrix directory is not sorted");
+        footer.insert(footer.end(), added.begin() + 24, added.end());
+        set_wide(footer, 8, footer.size());
+        uint32_t count = narrow(uint64_t(old_count) + new_count);
+        for (unsigned j = 0; j < 4; ++j) footer[16 + j] = count >> (8 * j);
+    }
+    uint64_t footer_at = position(output);
+    write_bytes(output, footer);
+    set_wide(bytes, 16, footer_at); set_wide(bytes, 24, footer.size());
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        auto loc = reader.vector_indexes()[kind];
+        set_wide(bytes, 32 + kind * 16, loc.length ? plus(loc.position, delta) : 0);
+        set_wide(bytes, 40 + kind * 16, loc.length);
+    }
+    check(std::fflush(output) == 0, "cannot flush All repair output");
+    write_at(0, bytes);
+    std::cerr << "All repair: syncing and validating before atomic publication\n";
+    check(fsync(fd) == 0, "cannot sync All repair output");
+    int closed = std::fclose(output); cleanup.file = nullptr;
+    check(closed == 0, "cannot close All repair output");
+    validate(cleanup.path);
+    reader.assert_unchanged();
+    check(std::rename(cleanup.path.c_str(), path.c_str()) == 0,
+          "cannot atomically publish All repair output");
+    cleanup.path.clear();
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begun).count();
+    std::cerr << "All repair: published " << path << " in " << seconds << " seconds\n";
 }
 } // namespace hic10

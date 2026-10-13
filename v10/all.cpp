@@ -1,5 +1,6 @@
 #include "all.h"
-#include "vector_updater.h"
+#include "repack.h"
+#include <iostream>
 #include <cctype>
 #include <cmath>
 #include <sys/stat.h>
@@ -115,6 +116,7 @@ void AllBuilder::write(Writer &writer) const {
 void add_all(const std::string &input, const std::string &output,
              const AllOptions &options, int level, uint32_t threads) {
     check(options.bins > 0 && options.bins <= 4096 && options.source > 0, "invalid All overview options");
+    check(threads > 0 && threads <= 256, "All repair copy threads must be 1..256");
     Reader reader(input);
     for (const auto &c : reader.header().chromosomes) if (is_all(c.name)) {
         // Refuse a misleading successful repair of an existing broken All.
@@ -122,13 +124,17 @@ void add_all(const std::string &input, const std::string &output,
         auto loc = reader.matrix_location({chr, chr});
         check(loc.length > 0, "All header exists without an All/All matrix");
         if (input != output) {
-            VectorOutput copy(reader, reader.header(), output, level, threads);
-            copy.finish(reader.header());
+            append_matrix_atomic(reader, reader.header(), output, threads, nullptr,
+                [](const std::string &path) {
+                    Reader validated(path); validated.validate_matrix_storage();
+                    validated.for_each_vector_entry([](uint64_t, VectorEntry) {});
+                });
         }
         return;
     }
     Header header = reader.header();
     AllBuilder all(header, options);
+    std::cerr << "All repair: aggregating stored " << all.source() << " bp matrices\n";
     all.collect(reader);
     std::string pattern = output + ".all-matrix.XXXXXX";
     std::vector<char> name(pattern.begin(), pattern.end()); name.push_back(0);
@@ -144,11 +150,11 @@ void add_all(const std::string &input, const std::string &output,
     }
     { Writer writer(cleanup.path, header, writer_options); all.write(writer); writer.finish({}); }
     Reader extra(cleanup.path);
-    VectorOutput replacement(reader, header, output, level, threads, &extra);
-    replacement.finish(header, [&](const std::string &path) {
+    append_matrix_atomic(reader, header, output, threads, &extra, [&](const std::string &path) {
         Reader validated(path);
         check(validated.header().chromosomes.size() == header.chromosomes.size(), "All repair header mismatch");
-        validated.matrix_relocation_fields();
+        validated.validate_matrix_storage();
+        validated.for_each_vector_entry([](uint64_t, VectorEntry) {});
         for (uint32_t ri = 0; ri < header.resolutions[0].size(); ++ri)
             validated.matrix(all.index(), all.index(), 0, ri);
     });

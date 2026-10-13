@@ -16,4 +16,11 @@ namespace hic10 {
 // A supplied pool copies matrix ranges concurrently to disjoint output offsets.
 Bytes repack_matrix_prefix(FILE *output, Reader &reader, const Header &header,
                            ThreadPool *pool = nullptr, Reader *extra = nullptr);
+// Large-file repair: preserve the source body at a constant offset, stream
+// pointer updates, append optional new matrices, validate, then rename atomically.
+// No per-block relocation map or storage sorting; memory is independent of the
+// total stored block count. Unreferenced source bytes are intentionally retained.
+void append_matrix_atomic(Reader &reader, const Header &header, const std::string &path,
+                          uint32_t threads, Reader *extra,
+                          const std::function<void(const std::string &)> &validate);
 } // namespace hic10

@@ -618,3 +618,9 @@ Existing files can be repaired with `hic_v10 add-all INPUT OUTPUT`, or the
 replacement copy; fresh assembly does not. See the
 [scaled All convention](../../hic-format/ScaledAllOverview.md) and
 [regular V10 repair documentation](../v10/README.md#stored-all-and-add-all-repair).
+
+For large existing-file repairs, the updated `hic_v10 add-all` uses a streamed
+parallel copy and pointer-update path without per-block relocation maps. A
+separate large executable is unnecessary for this operation. See
+[Slurm All repair](../v10/SlurmAddAll.md) for the 100G/150G launcher, preflight,
+space/runtime estimates, monitoring and interrupted-job recovery.

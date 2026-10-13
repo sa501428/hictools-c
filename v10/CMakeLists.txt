@@ -15,6 +15,7 @@ target_link_libraries(hic_v10 PRIVATE ${V10_ZSTD_LIBRARY} ZLIB::ZLIB Threads::Th
 set_target_properties(hic_v10 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 install(TARGETS hic_v10 DESTINATION bin)
 install(PROGRAMS ${PROJECT_SOURCE_DIR}/scripts/add_all_v10.py DESTINATION bin)
+install(PROGRAMS ${PROJECT_SOURCE_DIR}/scripts/slurm_add_all_v10.py DESTINATION bin)
 
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter)
@@ -26,6 +27,13 @@ if(BUILD_TESTING)
 
   set(STRAW_TEST_EXECUTABLE "" CACHE FILEPATH "Optional straw executable for V9/V10 integration tests")
   if(Python3_Interpreter_FOUND)
+    add_executable(test_v10_streamed_reader tests/test_streamed_reader.cpp reader.cpp)
+    target_include_directories(test_v10_streamed_reader PRIVATE ${PROJECT_SOURCE_DIR} ${V10_ZSTD_INCLUDE_DIR})
+    target_link_libraries(test_v10_streamed_reader PRIVATE ${V10_ZSTD_LIBRARY})
+    add_test(NAME v10_all_cluster
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_all_cluster.py
+              $<TARGET_FILE:hic_v10> $<TARGET_FILE:test_v10_streamed_reader>
+              ${PROJECT_SOURCE_DIR}/scripts/slurm_add_all_v10.py)
     add_test(NAME v10_writer_roundtrip
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_writer.py
               $<TARGET_FILE:hic_v10> $<TARGET_FILE:hic_pre> $<TARGET_FILE:hic_addnorm>
