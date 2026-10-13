@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <iostream>
 #include <sys/stat.h>
 
@@ -224,7 +225,12 @@ void append_matrix_atomic(Reader &reader, const Header &header, const std::strin
     if (!cleanup.file) { close(fd); check(false, "cannot open All repair temporary file"); }
     FILE *output = cleanup.file;
     auto bytes = serialize_header(header);
-    check(bytes.size() >= reader.header_length(), "All repair cannot shrink the header");
+    if (bytes.size() < reader.header_length()) {
+        Header padded = header;
+        padded.attributes.emplace_back("hicAll.repairPadding",
+            std::string(reader.header_length() - bytes.size(), ' '));
+        bytes = serialize_header(padded);
+    }
     uint64_t delta = bytes.size() - reader.header_length();
     uint64_t end = plus(reader.file_size(), delta);
     check(end <= uint64_t(INT64_MAX), "All repair output exceeds signed 64-bit file offsets");
@@ -284,14 +290,36 @@ void append_matrix_atomic(Reader &reader, const Header &header, const std::strin
     check(fseeko(output, end, SEEK_SET) == 0, "cannot seek appended All matrix");
     if (extra) {
         auto added = copy_matrix_storage(output, *extra, nullptr);
-        uint32_t old_count = get_word(footer, 16), new_count = get_word(added, 16);
-        if (old_count && new_count)
-            check(get_word(footer, footer.size() - 24) < get_word(added, 24),
-                  "appended All matrix directory is not sorted");
-        footer.insert(footer.end(), added.begin() + 24, added.end());
-        set_wide(footer, 8, footer.size());
-        uint32_t count = narrow(uint64_t(old_count) + new_count);
-        for (unsigned j = 0; j < 4; ++j) footer[16 + j] = count >> (8 * j);
+        std::map<MatrixKey, FileLocator> directory;
+        auto merge = [&](const Bytes &record) {
+            uint32_t count = get_word(record, 16);
+            for (uint32_t i = 0; i < count; ++i) {
+                size_t at = 24 + uint64_t(i) * 24;
+                directory[{get_word(record, at), get_word(record, at + 4)}] =
+                    {get_wide(record, at + 8), get_wide(record, at + 16)};
+            }
+        };
+        merge(footer);
+        // Rebuilding the pseudo chromosome also removes any old All/real pairs.
+        // Their copied bytes are inert; the active directory contains All/All only.
+        for (const auto &key : extra->matrices()) if (key.chr1 == key.chr2) {
+            const auto &name = header.chromosomes.at(key.chr1).name;
+            if (name.size() != 3 || std::tolower(static_cast<unsigned char>(name[0])) != 'a' ||
+                std::tolower(static_cast<unsigned char>(name[1])) != 'l' ||
+                std::tolower(static_cast<unsigned char>(name[2])) != 'l') continue;
+            for (auto it = directory.begin(); it != directory.end();) {
+                if (it->first.chr1 == key.chr1 || it->first.chr2 == key.chr1) it = directory.erase(it);
+                else ++it;
+            }
+        }
+        merge(added);
+        footer.clear(); magic(footer, "H10F"); put(footer, 1, 4);
+        put(footer, 24 + uint64_t(directory.size()) * 24, 8);
+        put(footer, narrow(directory.size()), 4); put(footer, 0, 4);
+        for (const auto &entry : directory) {
+            put(footer, entry.first.chr1, 4); put(footer, entry.first.chr2, 4);
+            put(footer, entry.second.position, 8); put(footer, entry.second.length, 8);
+        }
     }
     uint64_t footer_at = position(output);
     write_bytes(output, footer);

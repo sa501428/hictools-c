@@ -21,6 +21,30 @@ def main():
     straw = sys.argv[4] if len(sys.argv) > 4 else None
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp)
+        # Exact integer accumulation must survive V9 endpoint collisions.
+        endpoint = p/'exact-endpoint.v9.hic'
+        v9_fixture(endpoint, endpoint=True, floating=True, endpoint_values=(16777216, 1))
+        output = p/'exact-endpoint.v10.hic'
+        run([v10, 'convert', '--no-all', endpoint, output])
+        assert Hic(output).records(0, 0, 10) == [(0, 1, 16777217)]
+        # Fail after conversion has completed, while finalizing All. The existing
+        # destination must survive, as must it on invalid All options.
+        broken_all = p/'empty-all.v9.hic'
+        v9_fixture(broken_all, empty_all=True)
+        sentinel = p/'preserved.hic'
+        for extra, source in (([], broken_all), (['--all-bins', '0'], endpoint)):
+            sentinel.write_bytes(b'original destination')
+            run([v10, 'convert', *extra, source, sentinel], ok=False)
+            assert sentinel.read_bytes() == b'original destination'
+        if straw:
+            legacy_bounds, v10_bounds = p/'bounds-v9.hic', p/'bounds-v10.hic'
+            v9_fixture(legacy_bounds)
+            run([v10, 'convert', '--no-all', legacy_bounds, v10_bounds])
+            for region, size in [('chr1:0:10', 2), ('chr1:1:10', 1),
+                                 ('chr1:10:10', 1), ('chr1:11:19', 0)]:
+                old = run([straw, 'observed', 'NONE', legacy_bounds, region, region, 'BP', 10])
+                new = run([straw, 'observed', 'NONE', v10_bounds, region, region, 'BP', 10])
+                assert old == new and len(new.splitlines()) == size, (region, old, new)
         chrom = p/'chrom.sizes'; chrom.write_text('chr1\t10000\nchr2\t7500\n')
         rows = [('chr1', 0, 'chr1', 0), ('chr1', 1, 'chr1', 1),
                 ('chr1', 100, 'chr1', 250), ('chr1', 100, 'chr1', 250),
@@ -383,7 +407,7 @@ def main():
         if straw:
             assert len(run([straw, 'observed', 'NONE', p/'many.hic',
                             'chr1:60000000:60000100', 'chr2:60000000:60000100',
-                            'BP', 10]).splitlines()) == 10
+                            'BP', 10]).splitlines()) == 11
         # Error handling is transactional and never overwrites an existing file.
         saved = converted.read_bytes()
         for args in [

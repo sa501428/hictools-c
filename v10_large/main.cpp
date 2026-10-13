@@ -45,7 +45,7 @@ void usage() {
            "  hic_v10_large merge-pairs [--vectors vectors.manifest] [-t N] [--level N]\n"
            "      <stage.manifest> <build.manifest> <parts-dir> <output.hic>\n\n"
            "  Final write/merge overview options: --no-all, --all-bins N (default 500),\n"
-           "      --all-source-resolution N (default 2500000). All is enabled by default.\n\n"
+           "      --all-source-resolution N (default 500000). All is enabled by default.\n\n"
            "  hic_v10_large normalize [--memory SIZE] [--tmp DIR] [-t N] [--fan-in N]\n"
            "      [--no-vc] [--no-vc-sqrt] [--no-scale] [--no-warm-start]\n"
            "      [--cache-rollups] [--warm-vc-exponent N]\n"

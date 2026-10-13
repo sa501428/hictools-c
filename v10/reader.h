@@ -58,6 +58,7 @@ class Reader {
     std::vector<VectorEntry> vector_entries();
     // Stream indexes independently of total block count (1 MiB batches).
     void validate_matrix_storage();
+    std::vector<uint32_t> populated_bp_resolutions(MatrixKey key);
     void relocate_matrix_pointers(uint64_t delta,
         const std::function<void(uint64_t, const Bytes &)> &write);
     void for_each_vector_entry(const std::function<void(uint64_t, VectorEntry)> &emit);

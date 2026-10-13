@@ -13,11 +13,11 @@ and regression tests; it is not a measurement on a 500 GB production file.
 
 ## What scales and what costs time
 
-The repair aggregates raw canonical cis and trans contacts from the coarsest
-stored BP anchor no coarser than the requested source, normally 2,500,000 bp.
+The repair aggregates raw canonical cis and trans contacts from the nearest eligible
+stored BP anchor to the requested source, preferably 500,000 bp.
 It does not read original pairs/HBS or reconstruct fine matrices. Read depth
 changes count magnitudes, not the number of iterations through original reads.
-If 2.5 Mb is derived, the actual stored source can be finer; preflight reports
+If 500 kb is absent, the actual source can be finer or an eligible coarser fallback; preflight reports
 that source and the number of occupied source cells.
 
 Original file bytes after the header are copied in parallel 8 MiB ranges to a
@@ -116,10 +116,11 @@ estimate, not an I/O speed limit.
 Run the same command **without `--dry-run`** to submit. This creates a new job
 directory and prints the job ID. To request 150G, use `--memory 150G`.
 
-For approximately native human 2.5 Mb All bins, add `--all-bins 1250`. The default
-500-bin budget groups the source to a smaller overview. The data remain stored
+For All bins near the human 2.5 Mb scale, add `--all-bins 1250`. The default
+500-bin budget follows the approximately 500-bin V9 overview. Both store the
+V9-style genome length in kb with unpadded chromosome boundaries. The data remain stored
 at the existing finest advertised synthetic BP resolution in both cases.
-`--all-source-resolution 2500000` is the default source preference.
+`--all-source-resolution 500000` is the default source preference.
 
 Atomic in-place repair is explicit:
 
@@ -128,6 +129,10 @@ python3 scripts/slurm_add_all_v10.py /shared/maps/input.v10.hic --in-place \
   --hic-v10 "$PWD/build/v10-all/hic_v10" \
   --work-dir /shared/jobs/hic-all --threads 16 --memory 100G
 ```
+
+Add `--rebuild-all` to migrate an existing compact All to the V9-style span,
+or reconstruct a legacy All from real-chromosome data. The flag is forwarded to
+the worker; the full copy and free-space checks also apply to in-place rebuilds.
 
 A separate existing output is rejected unless `--overwrite` is supplied.
 Existing usable All is preserved; an in-place call on it is a no-op.
@@ -170,9 +175,9 @@ the worker lock prevents concurrent jobs from this launcher.
 ## Code-only validation
 
 The existing 4.40 GB hg38 sample repaired with 16 workers in approximately
-1.7–2.8 seconds in local warm-cache runs; peak resident memory was 166,346,752
-bytes (approximately 159 MiB), measured via `getrusage` on macOS. Independent
-C++ Straw verification found 82,718 All cells with an exact raw sum of
+3.4 seconds in local warm-cache runs; peak resident memory was 183,517,184
+bytes (approximately 175 MiB), measured via `getrusage` on macOS. Independent
+JS Straw verification found 116,967 All cells with an exact raw sum of
 1,000,062,822. This is evidence for the implementation and memory behavior,
 not a prediction of cluster storage speed or a 500 GB benchmark.
 

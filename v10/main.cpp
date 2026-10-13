@@ -17,10 +17,11 @@ static void usage() {
            "  hic_v10 addnorm [options] <file.v10.hic> (also: add-norm)\n\n"
            "  hic_v10 add-all [options] <input.v10.hic> <output.v10.hic>\n"
            "  hic_v10 add-all --in-place [options] <file.v10.hic>\n\n"
+           "  --rebuild-all      Replace existing All from real-chromosome contacts\n\n"
            "All overview options (pre/convert/add-all):\n"
            "  --no-all          Omit new All during pre/convert (existing All is preserved)\n"
            "  --all-bins N      Maximum overview width, 1..4096 (default 500)\n"
-           "  --all-source-resolution N  Preferred coarse BP source (default 2500000)\n\n"
+           "  --all-source-resolution N  Preferred coarse BP source (default 500000)\n\n"
            "  -t N               Parallel add-all copy workers, 1..256 (default 4)\n\n"
            "Common options:\n"
            "  --level N          Zstandard compression level (default 6)\n"
@@ -72,6 +73,7 @@ int main(int argc, char **argv) {
             usage();
             return 1;
         }
+        bool rebuild_all = false;
         std::string command = argv[1];
         if (command == "add-norm") command = "addnorm";
         if (command == "-h" || command == "--help") {
@@ -101,6 +103,7 @@ int main(int argc, char **argv) {
             else if (arg == "--all-bins" && command != "addnorm") opts.allBins = number(value());
             else if (arg == "--all-source-resolution" && command != "addnorm") opts.allSource = number(value());
             else if (arg == "--in-place" && command == "add-all") in_place = true;
+            else if (arg == "--rebuild-all" && command == "add-all") rebuild_all = true;
             else if ((command == "pre" || command == "convert") && arg == "--scores")
                 opts.scores = true;
             else if (command == "convert" && arg == "--no-resume")
@@ -209,7 +212,7 @@ int main(int argc, char **argv) {
                      "incorrect positional arguments (see --help)");
         if (command == "add-all")
             hic10::add_all(args[0], in_place ? args[0] : args[1],
-                           {opts.allBins, opts.allSource}, opts.level, opts.threads);
+                           {opts.allBins, opts.allSource, rebuild_all}, opts.level, opts.threads);
         else if (command == "pre")
             hic10::pre(args[0], args[1], args[2], opts, pre);
         else if (command == "convert")

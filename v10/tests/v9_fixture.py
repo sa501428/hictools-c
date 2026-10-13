@@ -6,11 +6,12 @@ def p(fmt, *args): return struct.pack('<'+fmt, *args)
 def s(value): return value.encode()+b'\0'
 
 def make(path, x_int=False, y_int=False, floating=False, dense=False, frag=False,
-         endpoint=False, bp_resolutions=(10,)):
+         endpoint=False, bp_resolutions=(10,), endpoint_values=(3, 7), empty_all=False):
     header = bytearray(b'HIC\0'+p('IQ', 9, 0)+s('fixture'))
     nvi_patch = len(header); header += bytes(16)
     header += p('I', 2)+s('unknown')+s('first')+s('unknown')+s('second')
-    header += p('I', 1)+s('chr1')+p('Q', 20 if endpoint else 80)
+    header += p('I', 2 if empty_all else 1)+s('chr1')+p('Q', 20 if endpoint else 80)
+    if empty_all: header += s('All')+p('Q', 80)
     header += p('I', len(bp_resolutions))+b''.join(p('I', bin) for bin in bp_resolutions)
     header += p('I', int(frag))
     if frag: header += p('I', 1)+p('I', 7)+b''.join(p('I', i) for i in range(5, 66, 10))
@@ -20,11 +21,11 @@ def make(path, x_int=False, y_int=False, floating=False, dense=False, frag=False
         # V9's floor(length / bin) + 1 geometry admits terminal bin 2 for
         # length 20 at resolution 10. V10 has two real bins (0 and 1), so
         # conversion folds that redundant endpoint into bin 1.
-        raw = p('iii4B', 2, 0, 0, 0, 0, 0, 1)
+        raw = p('iii4B', 2, 0, 0, int(floating), 0, 0, 1)
         raw += p('h', 2)
-        raw += p('h', 1)+p('h', 1)+p('h', 0)+p('h', 3)
-        raw += p('h', 2)+p('h', 1)+p('h', 0)+p('h', 7)
-        expected = [(0, 1, 10)]
+        raw += p('h', 1)+p('h', 1)+p('h', 0)+p('f' if floating else 'h', endpoint_values[0])
+        raw += p('h', 2)+p('h', 1)+p('h', 0)+p('f' if floating else 'h', endpoint_values[1])
+        expected = [(0, 1, sum(endpoint_values))]
     elif dense:
         # 2 rows x 3 columns: cells 0, 2 and 4 are present.
         raw = p('iii4Bih', 3, 0, 0, int(floating), int(x_int), int(y_int), 2, 6, 3)

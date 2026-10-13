@@ -653,7 +653,8 @@ void Writer::matrix(uint32_t a, uint32_t b, const std::function<Matrix(uint8_t, 
     if (!journal_.empty())
         record(a, b, metaPos, meta.size());
 }
-void Writer::finish(const std::vector<Vector> &vectors) {
+void Writer::finish(const std::vector<Vector> &vectors,
+                    const std::function<void(const std::string &)> &beforePublish) {
     std::array<std::vector<const Vector *>, 3> groups;
     for (const auto &v : vectors) {
         check(v.kind <= 2, "unknown vector kind");
@@ -778,6 +779,15 @@ void Writer::finish(const std::vector<Vector> &vectors) {
     auto f = file_;
     file_ = nullptr;
     check(std::fclose(f) == 0, "cannot close output");
+    // A finalizer may relocate the staged file's header and body. Its old
+    // matrix journal must not be used to resume that transformed byte stream.
+    if (beforePublish) {
+        if (!journal_.empty()) {
+            check(std::remove(journal_.c_str()) == 0, "cannot remove completed journal");
+            journal_.clear();
+        }
+        beforePublish(temporary_);
+    }
     check(std::rename(temporary_.c_str(), output_.c_str()) == 0, "cannot publish output");
     temporary_.clear();
     if (!journal_.empty()) {

@@ -43,10 +43,10 @@ def main():
         before = Hic(original)
         run(regular, 'pre', *common, pairs, built, sizes)
         direct = Hic(built)
-        assert direct.chroms == before.chroms + [('All', 18)]
+        assert direct.chroms == before.chroms + [('All', 1)]
         assert direct.res == before.res
         assert dict(direct.attributes)['hicAll.chromosomeBins'] == '10,8'
-        expected = [(0, 0, 1), (1, 2, 1), (9, 9, 1), (1, 10, 1), (9, 17, 1), (10, 17, 1)]
+        expected = [(0, 0, 6)]
         assert sorted(direct.records(2, 2, 1)) == sorted(expected)
         for r in [1, 2, 5, 10, 100]:
             assert sum(c for _, _, c in direct.records(2, 2, r)) == 6
@@ -77,7 +77,7 @@ def main():
         assert sum(v for _, _, v in derived_source.records(2, 2, 1)) == 6
         # Tight bin budget and tiny genomes preserve vector lengths.
         run(regular, 'pre', *common, '--all-bins', '2', pairs, p/'two.hic', sizes)
-        two = Hic(p/'two.hic'); assert two.chroms[-1] == ('All', 2)
+        two = Hic(p/'two.hic'); assert two.chroms[-1] == ('All', 1)
         assert sum(v for _, _, v in two.records(2, 2, 1)) == 6
         # Coarse-only large genomes must also fit desktop synthetic boundaries.
         big_sizes = p/'big.sizes'; big_sizes.write_text('chrA\t5000000000\nchrB\t4000000000\n')
@@ -105,8 +105,8 @@ def main():
         run(large, 'build-cells', '-r', '1,2,5,10,100', '--memory', '1MiB', stage/'stage.manifest', build)
         run(large, 'write', '--all-source-resolution', '10', '--memory', '1MiB', stage/'stage.manifest', build/'build.manifest', p/'large.hic')
         l = Hic(p/'large.hic')
-        assert l.chroms[-1] == ('All', 18)
-        assert (1, 2, count) in l.records(2, 2, 1)
+        assert l.chroms[-1] == ('All', 1)
+        assert (0, 0, count + 32) in l.records(2, 2, 1)
         for i in range(3):
             run(large, 'write-pair', '--memory', '1MiB', stage/'stage.manifest', build/'build.manifest', parts, i)
         run(large, 'merge-pairs', '--all-source-resolution', '10', stage/'stage.manifest', build/'build.manifest', parts, p/'merged.hic')
@@ -114,6 +114,67 @@ def main():
         for key in l.matrices: assert merged.matrices[key] == l.matrices[key]
         run(large, 'merge-pairs', '--no-all', stage/'stage.manifest', build/'build.manifest', parts, p/'without.hic')
         assert len(Hic(p/'without.hic').chroms) == 2
+        # V9-style kb span, unpadded boundaries, sparse finest coordinates, and
+        # replacement of an existing overview without renumbering chromosomes.
+        kb_sizes = p/'kb.sizes'; kb_sizes.write_text('chrA\t95000\nchrB\t75000\n')
+        kb_pairs = p/'kb.contacts'
+        kb_pairs.write_text('chrA 14000 chrA 25000\nchrA 16999 chrA 17000\nchrA 94000 chrB 74000\nchrB 0 chrB 74000\n')
+        kb = p/'kb.hic'
+        run(regular, 'pre', '-r', '1,10000', '--all-source-resolution', '1', kb_pairs, kb, kb_sizes)
+        initial = Hic(kb)
+        assert initial.chroms[-1] == ('All', 170)
+        assert dict(initial.attributes)['hicAll.version'] == '2'
+        assert initial.records(2, 2, 1) == [(14, 25, 1), (16, 17, 1), (94, 169, 1), (95, 169, 1)]
+        rebuilt = p/'kb.rebuilt.hic'
+        run(regular, 'add-all', '--rebuild-all', '--all-bins', '10', '--all-source-resolution', '1', kb, rebuilt)
+        changed = Hic(rebuilt)
+        assert changed.chroms == initial.chroms
+        assert dict(changed.attributes)['hicAll.storageStride'] == '17'
+        assert dict(changed.attributes)['hicAll.coordinateScale'] == '1000'
+        assert dict(changed.attributes)['hicAll.binCount'] == '10'
+        assert changed.records(2, 2, 1) == [(0, 17, 2), (85, 153, 2)]
+        assert len({key[:2] for key in changed.matrices}) == len({key[:2] for key in initial.matrices})
+        assert changed.vectors == initial.vectors
+        for key, matrix in initial.matrices.items():
+            if key[0] != 2: assert changed.matrices[key] == matrix
+        # A shorter metadata header is padded safely during full-body shifting.
+        run(regular, 'add-all', '--rebuild-all', '--all-bins', '10', '--in-place', kb)
+        assert Hic(kb).chroms == initial.chroms
+        assert sum(c for _, _, c in Hic(kb).records(2, 2, 1)) == 4
+        # Existing convention-one files migrate from their real matrices.
+        old_fixture = Path(__file__).resolve().parents[3]/'straw'/'C++'/'tests'/'pseudo-all.hic'
+        if old_fixture.exists():
+            migrated = p/'migrated.hic'
+            run(regular, 'add-all', '--rebuild-all', old_fixture, migrated)
+            old, new = Hic(old_fixture), Hic(migrated)
+            assert new.chroms[-1] == ('All', 1)
+            assert new.vectors == old.vectors
+            assert sum(c for _, _, c in new.records(2, 2, 1)) == (1 << 53) + 49
+        fallback_sizes = p/'fallback.sizes'
+        fallback_sizes.write_text('chrA\t1500000000\nchrB\t1500000000\n')
+        fallback_pairs = p/'fallback.contacts'; fallback_pairs.write_text('chrA 0 chrB 0\n')
+        run(regular, 'pre', '-r', '1000,2500000', fallback_pairs, p/'fallback.hic', fallback_sizes)
+        fallback = Hic(p/'fallback.hic')
+        assert dict(fallback.attributes)['hicAll.sourceResolution'] == '2500000'
+        assert fallback.chroms[-1] == ('All', 3000000)
+        if len(sys.argv) > 4 and sys.argv[4]:
+            v9, straw = sys.argv[3:5]
+            legacy_kb = p/'kb.v9.hic'
+            run(v9, '-r', '1,10000', kb_pairs, legacy_kb, kb_sizes)
+            coarse_legacy = p/'coarse.v9.hic'
+            run(v9, '-r', '1000,10000', kb_pairs, coarse_legacy, kb_sizes)
+            preserved = p/'preserved-legacy.v10.hic'
+            run(regular, 'convert', coarse_legacy, preserved)
+            assert Hic(preserved).chroms[0][0].lower() == 'all'
+            run(regular, 'add-all', '--rebuild-all', '--in-place', preserved)
+            migrated_legacy = Hic(preserved)
+            assert migrated_legacy.chroms[0][1] == 170
+            assert dict(migrated_legacy.attributes)['hicAll.sourceResolution'] == '1000'
+            assert sum(c for _, _, c in migrated_legacy.records(0, 0, 1)) == 4
+            raw = run(straw, 'observed', 'NONE', legacy_kb, 'ALL', 'ALL', 'BP', '1').stdout
+            legacy_records = sorted((int(x), int(y), int(float(v))) for x,y,v in
+                (line.split() for line in raw.splitlines() if line.strip()))
+            assert sorted(initial.records(2, 2, 1)) == legacy_records
     print('Scaled All: default writers, exact counts, levels, no trans pairs, atomic repair, vectors, FRAG, and distributed assembly passed')
 
 if __name__ == '__main__': main()

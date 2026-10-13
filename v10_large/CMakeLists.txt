@@ -43,7 +43,8 @@ if(BUILD_TESTING)
   if(Python3_Interpreter_FOUND)
     add_test(NAME v10_scaled_all
       COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/v10/tests/test_all.py
-              $<TARGET_FILE:hic_v10> $<TARGET_FILE:hic_v10_large>)
+              $<TARGET_FILE:hic_v10> $<TARGET_FILE:hic_v10_large>
+              $<TARGET_FILE:hic_pre> ${STRAW_TEST_EXECUTABLE})
     add_test(NAME v10_large_stage_and_rollup
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_large.py
               $<TARGET_FILE:hic_v10_large> $<TARGET_FILE:hic_v10>)

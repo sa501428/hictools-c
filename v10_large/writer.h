@@ -10,7 +10,7 @@ namespace hic10large {
 
 struct WriteOptions {
     bool include_all = true;
-    uint32_t all_bins = 500, all_source = 2500000;
+    uint32_t all_bins = 500, all_source = 500000;
     std::string genome;
     std::string temporary_directory;
     std::string vector_manifest;

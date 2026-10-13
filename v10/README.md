@@ -434,55 +434,50 @@ ctest --test-dir build --output-on-failure
 
 ## Stored All and add-All repair
 
-All is a small ordinary chromosome at the finest advertised BP resolution.
-For example, a file with finest bin 100 stores its useful All overview at
-synthetic bin 100; it does not add 1 bp to the global resolution list. The other
-All levels contain valid aggregates and usually collapse to a few bins. All/chrN
-pairs are absent and therefore zero. Real chromosome indices stay unchanged.
+New All uses the **V9-style genome length in kilobases**, with unpadded
+chromosome boundaries. For the hg38 sample its length is 3,088,286, matching
+V9. The useful matrix remains at the finest advertised BP resolution; sparse
+stored bin coordinates span the full pseudo chromosome. Metadata-aware viewers
+map those coordinates into a compact overview. The global resolution list and
+`.hic` binary format remain unchanged.
 
-The default maximum overview width is 500 bins and preferred source resolution
-is 2.5 Mb. `--all-bins 1250` retains approximately the native human 2.5 Mb grid;
-`--all-source-resolution N` chooses a different source preference. The repair
-reader selects a stored materialized anchor no coarser than the preference.
-The actual bin count can be below the requested budget because source bins are
-grouped by an integer factor. Source data are raw, unnormalized, canonical cis
-and trans cells, and integer counts are summed exactly. No All normalization
-vectors or expected scale factors are generated.
+The default display budget is approximately 500 bins, following V9's
+`floor(All length / 500)` interval and rounding to the finest resolution.
+`--all-bins 1250` requests a grid closer to 2.5 Mb. The preferred raw source
+is now **500 kb**, reducing boundary-placement differences. The nearest eligible
+materialized anchor is used, with finer ties and a coarser fallback limited by
+the physical overview interval; this avoids scanning extremely fine data when
+only a coarser anchor is present. The actual source is logged and reported by
+Slurm preflight. Raw integer totals are preserved; bin distributions can differ
+slightly from V9 because coarse source cells lack individual read positions.
 
 ```sh
-build/hic_v10 pre --all-bins 500 --all-source-resolution 2500000 \
-  input.pairs output.v10.hic hg38
+build/v10-all/hic_v10 add-all input.v10.hic with-all.v10.hic
 
-# Repair from existing map data; no original pairs or HBS required.
-build/hic_v10 add-all input.v10.hic with-all.v10.hic
-build/hic_v10 add-all --in-place input.v10.hic
-python3 scripts/add_all_v10.py --hic-v10 build/hic_v10 input.v10.hic with-all.v10.hic
+# Explicit migration/reconstruction of existing compact or legacy All.
+build/v10-all/hic_v10 add-all --rebuild-all input.with-all.v10.hic with-v9-style-all.v10.hic
+build/v10-all/hic_v10 add-all --rebuild-all --in-place input.with-all.v10.hic
+python3 scripts/add_all_v10.py --hic-v10 build/v10-all/hic_v10 \
+  --rebuild-all input.with-all.v10.hic with-v9-style-all.v10.hic
 ```
 
-The standalone repair command accepts V10 input. Convert V9 first with
-`hic_v10 convert`; conversion preserves existing legacy All and adds scaled All
-when All is absent, unless `--no-all` is supplied. Existing usable All is
-preserved; an All header without its matrix is reported as an error.
+Existing All is preserved unless `--rebuild-all` is supplied. That flag retains
+its chromosome index, replaces its active All/All matrix and removes old
+All/real matrix entries. Rebuilding an All with normalization vectors is
+rejected to avoid retaining vectors of the wrong length. Real matrices,
+normalizations and expected values remain exact. FRAG All remains empty.
 
-Repair writes a validated replacement atomically, copying original compressed
-blocks and vector chunks with their exact contents and relocating absolute
-pointers. Allow space and copy time for the entire replacement file. Native
-preprocessing collects All from prepared coarse matrices before finalization,
-so new files do not require a second whole-file copy. For conversion lacking
-All, the current implementation performs the repair after conversion.
+The standalone repair accepts V10; convert V9 first. Conversion preserves
+usable legacy All. New files from `pre`, large `write` and `merge-pairs` use
+version-two metadata. The readers/viewers retain support for the earlier
+version-one compact All convention. See
+[the conventions](../../hic-format/ScaledAllOverview.md) for formulas and APIs.
 
-The `hicAll.*` attributes record physical layout separately from synthetic
-coordinates. See [the convention](../../hic-format/ScaledAllOverview.md).
-Readers that do not interpret these attributes can decode the matrices but
-need updating for correct All zoom selection and chromosome boundary display.
-Regression coverage is `v10/tests/test_all.py` / CTest `v10_scaled_all`.
-
-Large-file repair uses a parallel body copy with a constant offset shift and
-streamed pointer updates, avoiding per-block relocation tables. Block indexes
-are processed in 1 MiB batches, including indexes larger than 512 MiB. The old
-body and obsolete footer bytes are retained; output is approximately the
-original size plus All and a new footer. For 100G/150G Slurm jobs, metadata/disk
-preflight, submission scripts, runtime estimates and recovery instructions, see
-[repair on Slurm](SlurmAddAll.md). This operation uses `hic_v10 add-all` for both
-ordinary and large files; it does not change the resource behavior of other
-commands. Additional regression coverage is CTest `v10_all_cluster`.
+Repair copies the original body in parallel, patches pointers/indexes in bounded
+batches and atomically publishes a validated replacement. It avoids per-block
+relocation maps and processes indexes larger than 512 MiB. Obsolete copied
+records remain inert; output grows by the new All, metadata and active footer.
+A full-file copy and additional disk space are required, also in place. See
+[Slurm repair](SlurmAddAll.md) for 100G/150G allocations, preflight, runtime
+estimates, monitoring and recovery. Regression tests include `v10_scaled_all`
+and `v10_all_cluster`, plus the cross-reader `kilobase-all.hic` fixtures.

@@ -167,6 +167,8 @@ def main():
         run('bash', '-n', directory / 'repair.sbatch')
         run('bash', directory / 'repair.sbatch')
         assert Hic(output).chroms[-1][0] == 'All'
+        preserved_report = module.inspect(output, 500, 1000, 4)
+        assert preserved_report['existing_all_action'] == 'preserve' and preserved_report['source_cells'] == 0
         assert json.loads((directory / 'result.json').read_text())['returncode'] == 0
         assert not Path(str(output) + '.add-all.lock').exists()
         assert module.inspect(source, 500, 1000, 4)['conservative_ram_estimate_bytes'] == info['conservative_ram_estimate_bytes']
@@ -185,7 +187,7 @@ def main():
         from types import SimpleNamespace
         from unittest.mock import patch
         settings = SimpleNamespace(input=source, output=stale_output, all_bins=500,
-            all_source_resolution=1000, threads=4, memory='100G', overwrite=False, copy_gbps=0.5)
+            all_source_resolution=1000, threads=4, memory='100G', overwrite=False, copy_gbps=0.5, rebuild_all=False)
         with patch.object(module.shutil, 'disk_usage', return_value=SimpleNamespace(free=0)):
             try:
                 module.preflight(settings)

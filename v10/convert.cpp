@@ -402,19 +402,45 @@ PreparedMatrix prepareMatrix(const std::string &input, LegacyMatrix matrix, cons
                     }
                 }
             }
+            // Classification is now complete. Convert the already spooled
+            // non-boundary cells once, before writing exact merged counts.
+            if (!range.scores) {
+                auto end = ftello(prepared.spool->file);
+                check(end >= 0, "cannot locate count spool end");
+                for (uint64_t i = 0; i < range.cells; i += 4096) {
+                    auto at = range.offset + i * 16;
+                    const auto n = std::min<uint64_t>(4096, range.cells - i);
+                    std::vector<Cell> cells;
+                    cells.reserve(n);
+                    check(fseeko(prepared.spool->file, at, SEEK_SET) == 0, "cannot seek count spool");
+                    for (uint64_t j = 0; j < n; ++j) {
+                        Cell cell = readCell(prepared.spool->file);
+                        cell.value = static_cast<uint64_t>(floating(static_cast<uint32_t>(cell.value)));
+                        cells.push_back(cell);
+                    }
+                    check(fseeko(prepared.spool->file, at, SEEK_SET) == 0, "cannot seek count spool");
+                    for (const auto &cell : cells) writeCell(prepared.spool->file, cell);
+                }
+                check(fseeko(prepared.spool->file, end, SEEK_SET) == 0, "cannot restore count spool");
+            }
             uint64_t mergedEndpoints = 0;
             for (auto &[coordinate, pending] : boundary) {
                 if (pending.migrated && pending.values.size() > 1) {
-                    float sum = 0;
-                    for (uint32_t value : pending.values)
-                        sum += floating(value);
-                    pending.cell.value = bits(sum);
-                    classify(static_cast<uint32_t>(pending.cell.value));
+                    if (range.scores) {
+                        double sum = 0;
+                        for (uint32_t value : pending.values) sum += double(floating(value));
+                        pending.cell.value = bits(static_cast<float>(sum));
+                    } else {
+                        uint64_t sum = 0;
+                        for (uint32_t value : pending.values)
+                            sum = plus(sum, static_cast<uint64_t>(floating(value)));
+                        pending.cell.value = sum;
+                    }
                     mergedEndpoints = plus(mergedEndpoints, pending.values.size() - 1);
                     store(pending.cell);
                 } else
                     for (uint32_t value : pending.values) {
-                        pending.cell.value = value;
+                        pending.cell.value = range.scores ? value : static_cast<uint64_t>(floating(value));
                         store(pending.cell);
                     }
             }
@@ -476,6 +502,9 @@ void fitVector(Input &f, Header &h, LegacyVector &legacy) {
 }
 } // namespace
 void convert(const std::string &input, const std::string &output, const Options &options) {
+    if (options.includeAll)
+        check(options.allBins > 0 && options.allBins <= 4096 && options.allSource > 0,
+              "invalid All overview options");
     struct stat in{}, out{};
     check(stat(input.c_str(), &in) == 0, "cannot stat input");
     check(stat(output.c_str(), &out) != 0 || in.st_dev != out.st_dev || in.st_ino != out.st_ino,
@@ -699,7 +728,7 @@ void convert(const std::string &input, const std::string &output, const Options 
     // Identify the run by everything that changes the bytes written: the source
     // file, the destination, and every option the writer encodes with. A resumed
     // journal or workspace that does not match this key is not reused.
-    std::string identity = "hictools-v10-convert\x1f" + input + "\x1f" + output + "\x1f" +
+    std::string identity = "hictools-v10-convert-exact-v2\x1f" + input + "\x1f" + output + "\x1f" +
                            std::to_string(uint64_t(in.st_dev)) + "\x1f" +
                            std::to_string(uint64_t(in.st_ino)) + "\x1f" +
                            std::to_string(uint64_t(in.st_size)) + "\x1f" +
@@ -742,10 +771,6 @@ void convert(const std::string &input, const std::string &output, const Options 
             result.cells.reserve(static_cast<size_t>(range.cells));
             for (uint64_t i = 0; i < range.cells; ++i)
                 result.cells.push_back(readCell(spool.get()));
-            if (!result.scores)
-                for (auto &cell : result.cells)
-                    cell.value =
-                        static_cast<uint64_t>(floating(static_cast<uint32_t>(cell.value)));
             return result;
         });
     };
@@ -769,12 +794,14 @@ void convert(const std::string &input, const std::string &output, const Options 
         }
         while (!pending.empty())
             consume();
-        writer.finish(vectors);
-        if (options.includeAll) add_all(output, output, {options.allBins, options.allSource}, options.level, options.threads);
+        writer.finish(vectors, [&](const std::string &staged) {
+            if (options.includeAll)
+                add_all(staged, staged, {options.allBins, options.allSource}, options.level, options.threads);
+        });
     } catch (...) {
         std::fprintf(stderr,
-                     "Staged output kept at %s; rerun the same command to resume"
-                     " (add --no-resume to start over)\n",
+                     "Destination unchanged. Staged work: %s; rerun the same command"
+                     " to resume when a valid journal remains, or restart finalization.\n",
                      writerOptions.stagingPath.c_str());
         throw;
     }

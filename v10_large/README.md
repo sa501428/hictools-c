@@ -594,7 +594,7 @@ The useful All level represents a coarse genome-wide overview in synthetic
 coordinates; `hicAll.*` attributes record its physical source and boundaries.
 
 These final-assembly commands accept `--no-all`, `--all-bins N` (default 500,
-maximum 4096), and `--all-source-resolution N` (default 2500000). All options
+maximum 4096), and `--all-source-resolution N` (default 500000). All options
 belong on the final `write` or `merge-pairs` invocation. Pair fragments contain
 only real chromosome pairs and are reusable across these overview choices;
 All is assembled once by the coordinator rather than duplicated by workers.
@@ -607,7 +607,7 @@ appends only the small All matrix; real block payloads remain unchanged.
 Neither native path recopies an already finished whole file to add All.
 
 ```sh
-build/hic_v10_large write --all-bins 500 --all-source-resolution 2500000 \
+build/hic_v10_large write --all-bins 500 --all-source-resolution 500000 \
   stage/stage.manifest cells/build.manifest output.v10.hic
 build/hic_v10_large merge-pairs --no-all \
   stage/stage.manifest cells/build.manifest parts output-without-all.v10.hic
@@ -624,3 +624,11 @@ parallel copy and pointer-update path without per-block relocation maps. A
 separate large executable is unnecessary for this operation. See
 [Slurm All repair](../v10/SlurmAddAll.md) for the 100G/150G launcher, preflight,
 space/runtime estimates, monitoring and interrupted-job recovery.
+
+New All now uses convention version 2: its chromosome length is the V9-style
+unpadded genome span in kb, while sparse contacts remain at the finest advertised
+resolution. The default preferred source is 500 kb; eligible coarse fallback
+avoids an unnecessary fine-resolution scan. Existing compact All can be migrated
+with `hic_v10 add-all --rebuild-all INPUT OUTPUT`. See the
+[conventions](../../hic-format/ScaledAllOverview.md) for the coordinate formula
+and compatibility with version-one files.

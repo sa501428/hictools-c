@@ -5,6 +5,7 @@
 #include <cmath>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <set>
 
 namespace hic10 {
 bool is_all(const std::string &name) {
@@ -12,53 +13,91 @@ bool is_all(const std::string &name) {
         std::tolower(static_cast<unsigned char>(name[1])) == 'l' &&
         std::tolower(static_cast<unsigned char>(name[2])) == 'l';
 }
+namespace {
+uint32_t choose_source(const Header &h, uint64_t preference, uint64_t physical_scale,
+                       const std::vector<uint32_t> &allowed = {}) {
+    auto eligible = [&](const Resolution &r) {
+        return !r.mode && (allowed.empty() || std::find(allowed.begin(), allowed.end(), r.bin) != allowed.end());
+    };
+    uint32_t below = 0, above = 0, first = 0;
+    preference = std::min(preference, physical_scale);
+    for (const auto &r : h.resolutions[0]) if (eligible(r)) {
+        if (!first) first = r.bin;
+        if (r.bin <= preference) below = r.bin;
+        if (!above && r.bin >= preference && r.bin <= physical_scale) above = r.bin;
+    }
+    check(first > 0, "All has no usable source resolution");
+    if (!below) return above ? above : first;
+    using Wide = unsigned __int128;
+    return above && Wide(above) * below < Wide(preference) * preference ? above : below;
+}
+}
 AllBuilder::AllBuilder(Header &h, const AllOptions &o) {
     check(o.bins > 0 && o.bins <= 4096 && o.source > 0, "invalid All overview options");
     check(!h.resolutions[0].empty(), "All requires a BP resolution");
-    for (const auto &c : h.chromosomes) check(!is_all(c.name), "All already exists");
     finest_ = h.resolutions[0].front().bin;
-    // Select a stored anchor no coarser than the requested source. Never decode
-    // a derived matrix into memory just to build the overview.
-    source_ = finest_;
-    for (const auto &r : h.resolutions[0])
-        if (!r.mode && r.bin <= o.source) source_ = r.bin;
+    preference_ = o.source;
     index_ = narrow(h.chromosomes.size());
+    for (uint32_t i = 0; i < h.chromosomes.size(); ++i) if (is_all(h.chromosomes[i].name)) {
+        check(o.rebuild && index_ == h.chromosomes.size(), "All already exists or is duplicated");
+        index_ = i;
+    }
     uint64_t total = 0, maximum_length = 0;
-    std::string lengths;
-    for (const auto &c : h.chromosomes) {
-        offsets_.push_back(total);
-        uint64_t n = ceil_div(c.length, source_);
-        total = plus(total, n);
+    offsets_.resize(h.chromosomes.size());
+    for (uint32_t i = 0; i < h.chromosomes.size(); ++i) {
+        const auto &c = h.chromosomes[i];
+        if (i == index_) continue;
+        offsets_[i] = total;
+        total = plus(total, c.length);
         maximum_length = std::max(maximum_length, c.length);
-        if (!lengths.empty()) lengths += ',';
-        lengths += std::to_string(n);
     }
     check(total > 0, "All requires real chromosomes");
-    // Keep the largest expected-vector length unchanged, even for tiny genomes.
-    uint64_t limit = std::min<uint64_t>(o.bins, std::max<uint64_t>(1, maximum_length / finest_));
-    // Desktop 1.x stores All boundary coordinates in signed 32-bit arrays.
-    // This is a producer sizing policy, not a new wire-format restriction.
-    limit = std::min<uint64_t>(limit, std::max<uint64_t>(1, uint64_t(INT32_MAX) / finest_));
-    group_ = ceil_div(total, limit);
-    check(group_ <= UINT64_MAX / source_, "All physical scale overflow");
-    uint64_t bins = ceil_div(total, group_);
-    check(bins <= UINT64_MAX / finest_, "All chromosome length overflow");
-    h.chromosomes.push_back({"All", bins * finest_, {}});
+    // V9 uses unpadded genome-wide kilobase coordinates. Raise the scale only
+    // for unusual genomes where kb would enlarge expected vectors or overflow
+    // desktop boundary arrays. Ordinary mammalian maps retain exactly scale 1000.
+    coordinate_scale_ = std::max<uint64_t>(1000, std::max(ceil_div(total, maximum_length),
+                                                        ceil_div(total, uint64_t(INT32_MAX))));
+    span_ = std::max<uint64_t>(1, total / coordinate_scale_);
+    // Match V9's floor(All length / 500) overview width, rounded upward only
+    // when the advertised finest resolution cannot represent that interval.
+    uint64_t nominal = std::max<uint64_t>(1, span_ / o.bins);
+    stride_ = std::max<uint64_t>(1, ceil_div(nominal, finest_));
+    display_resolution_ = stride_ * finest_;
+    if (ceil_div(span_, display_resolution_) > uint64_t(o.bins) + 1) {
+        stride_ = ceil_div(ceil_div(span_, uint64_t(o.bins) + 1), finest_);
+        display_resolution_ = stride_ * finest_;
+    }
+    bins_ = narrow(ceil_div(span_, display_resolution_));
+    check(display_resolution_ <= UINT64_MAX / coordinate_scale_, "All physical scale overflow");
+    source_ = choose_source(h, o.source, display_resolution_ * coordinate_scale_, o.sources);
+    std::string lengths;
+    for (uint32_t i = 0; i < h.chromosomes.size(); ++i) if (i != index_) {
+        if (!lengths.empty()) lengths += ',';
+        lengths += std::to_string(ceil_div(h.chromosomes[i].length, source_));
+    }
+    if (index_ == h.chromosomes.size()) h.chromosomes.push_back({"All", span_, {}});
+    else { h.chromosomes[index_].length = span_; h.chromosomes[index_].sites.clear(); }
+    h.attributes.erase(std::remove_if(h.attributes.begin(), h.attributes.end(), [](const auto &a) {
+        return a.first.compare(0, 7, "hicAll.") == 0;
+    }), h.attributes.end());
     h.attributes.insert(h.attributes.end(), {
-        {"hicAll.version", "1"}, {"hicAll.sourceResolution", std::to_string(source_)},
-        {"hicAll.groupFactor", std::to_string(group_)},
+        {"hicAll.version", "2"}, {"hicAll.sourceResolution", std::to_string(source_)},
+        {"hicAll.groupFactor", "1"},
         {"hicAll.finestResolution", std::to_string(finest_)},
-        {"hicAll.binCount", std::to_string(bins)}, {"hicAll.chromosomeBins", lengths}});
+        {"hicAll.binCount", std::to_string(bins_)}, {"hicAll.chromosomeBins", lengths},
+        {"hicAll.coordinateScale", std::to_string(coordinate_scale_)},
+        {"hicAll.storageStride", std::to_string(stride_)}});
     header_ = h;
 }
 void AllBuilder::add(uint32_t a, uint32_t b, uint64_t x, uint64_t y,
                      uint32_t bin, uint64_t value, bool score) {
-    check(a < index_ && b < index_ && bin > 0, "invalid All source chromosome/bin");
+    check(a < offsets_.size() && b < offsets_.size() && a != index_ && b != index_ && bin > 0, "invalid All source chromosome/bin");
     auto coordinate = [&](uint32_t chr, uint64_t p) {
         check(p <= UINT64_MAX / bin, "All source coordinate overflow");
         uint64_t bp = p * bin;
         check(bp < header_.chromosomes[chr].length, "All source coordinate out of bounds");
-        return narrow(plus(offsets_[chr], bp / source_) / group_);
+        uint64_t pseudo = std::min(span_ - 1, plus(offsets_[chr], bp) / coordinate_scale_);
+        return narrow(pseudo / display_resolution_);
     };
     uint32_t i = coordinate(a, x), j = coordinate(b, y);
     if (i > j) std::swap(i, j);
@@ -74,9 +113,15 @@ void AllBuilder::add(uint32_t a, uint32_t b, uint64_t x, uint64_t y,
     else counts_[key] = plus(counts_[key], value);
 }
 void AllBuilder::collect(Reader &reader) {
-    uint32_t ri = reader.header().resolution(0, source_);
     for (auto key : reader.matrices()) {
-        if (key.chr1 >= index_ || key.chr2 >= index_) continue;
+        if (key.chr1 == index_ || key.chr2 == index_) continue;
+        auto populated = reader.populated_bp_resolutions(key);
+        if (populated.empty()) continue;
+        uint32_t bin = std::find(populated.begin(), populated.end(), source_) != populated.end()
+            ? source_ : choose_source(reader.header(), preference_, display_resolution_ * coordinate_scale_, populated);
+        uint32_t ri = reader.header().resolution(0, bin);
+        if (bin != source_) std::cerr << "All repair: pair " << key.chr1 << '_' << key.chr2
+            << " uses populated fallback " << bin << " bp\n";
         // stream_materialized emits canonical raw cells and preserves u64 counts.
         // The type is a matrix property; Reader exposes it through this small
         // descriptor read rather than materializing the source matrix.
@@ -84,7 +129,7 @@ void AllBuilder::collect(Reader &reader) {
         auto desc = reader.read_bytes(loc.position + 24 + uint64_t(ri) * 76, 4);
         bool scored = desc.at(3) == 1;
         reader.stream_materialized(key.chr1, key.chr2, 0, ri, [&](const Cell &c) {
-            add(key.chr1, key.chr2, c.x, c.y, source_, c.value, scored);
+            add(key.chr1, key.chr2, c.x, c.y, bin, c.value, scored);
         }, true);
     }
 }
@@ -93,8 +138,8 @@ Matrix AllBuilder::matrix(uint8_t unit, uint32_t ri) const {
     if (unit) return result; // No restriction-fragment interpretation for All.
     uint32_t bin = header_.resolutions[0].at(ri).bin;
     auto key = [&](std::pair<uint32_t, uint32_t> c) {
-        return std::make_pair(narrow(uint64_t(c.first) * finest_ / bin),
-                              narrow(uint64_t(c.second) * finest_ / bin));
+        return std::make_pair(narrow(uint64_t(c.first) * display_resolution_ / bin),
+                              narrow(uint64_t(c.second) * display_resolution_ / bin));
     };
     result.scores = scored_;
     if (scored_) {
@@ -118,7 +163,7 @@ void add_all(const std::string &input, const std::string &output,
     check(options.bins > 0 && options.bins <= 4096 && options.source > 0, "invalid All overview options");
     check(threads > 0 && threads <= 256, "All repair copy threads must be 1..256");
     Reader reader(input);
-    for (const auto &c : reader.header().chromosomes) if (is_all(c.name)) {
+    for (const auto &c : reader.header().chromosomes) if (is_all(c.name) && !options.rebuild) {
         // Refuse a misleading successful repair of an existing broken All.
         uint32_t chr = narrow(&c - reader.header().chromosomes.data());
         auto loc = reader.matrix_location({chr, chr});
@@ -132,8 +177,19 @@ void add_all(const std::string &input, const std::string &output,
         }
         return;
     }
+    if (options.rebuild) reader.for_each_vector_entry([&](uint64_t, VectorEntry v) {
+        if (v.kind == 0) check(!is_all(reader.header().chromosomes[v.chr].name),
+            "cannot rebuild an All with normalization vectors; remove those vectors first");
+    });
     Header header = reader.header();
-    AllBuilder all(header, options);
+    AllOptions actual = options;
+    std::set<uint32_t> populated;
+    for (auto key : reader.matrices()) {
+        if (is_all(reader.header().chromosomes[key.chr1].name) || is_all(reader.header().chromosomes[key.chr2].name)) continue;
+        for (auto bin : reader.populated_bp_resolutions(key)) populated.insert(bin);
+    }
+    actual.sources.assign(populated.begin(), populated.end());
+    AllBuilder all(header, actual);
     std::cerr << "All repair: aggregating stored " << all.source() << " bp matrices\n";
     all.collect(reader);
     std::string pattern = output + ".all-matrix.XXXXXX";

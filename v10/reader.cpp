@@ -309,6 +309,12 @@ void Reader::block_index_batches(const Zoom &z,
         emit(at, bytes);
     }
 }
+std::vector<uint32_t> Reader::populated_bp_resolutions(MatrixKey key) {
+    std::vector<uint32_t> bins;
+    for (const auto &z : metadata(key).zooms)
+        if (z.unit == 0 && !z.mode && z.occupied) bins.push_back(z.bin);
+    return bins;
+}
 void Reader::validate_matrix_storage() {
     for (auto key : matrix_keys_)
         for (const auto &z : metadata(key).zooms)

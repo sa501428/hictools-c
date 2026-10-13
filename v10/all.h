@@ -5,7 +5,9 @@ namespace hic10 {
 // Scaled overview convention uses ordinary V10 header attributes and matrices.
 struct AllOptions {
     uint32_t bins = 500;
-    uint32_t source = 2500000;
+    uint32_t source = 500000;
+    bool rebuild = false;
+    std::vector<uint32_t> sources; // Optional populated anchors for repair.
 };
 bool is_all(const std::string &name);
 class AllBuilder {
@@ -20,8 +22,9 @@ class AllBuilder {
     void write(Writer &writer) const;
   private:
     Header header_;
-    uint32_t index_, source_, finest_;
-    uint64_t group_;
+    uint32_t index_, source_, finest_, preference_;
+    uint64_t coordinate_scale_, display_resolution_, stride_, span_;
+    uint32_t bins_;
     std::vector<uint64_t> offsets_;
     std::map<std::pair<uint32_t, uint32_t>, uint64_t> counts_;
     std::map<std::pair<uint32_t, uint32_t>, double> scores_;

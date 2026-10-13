@@ -238,7 +238,7 @@ struct Options {
     std::vector<uint32_t> materialized;
     bool scores = false, verifyDerived = true;
     bool includeAll = true;
-    uint32_t allBins = 500, allSource = 2500000;
+    uint32_t allBins = 500, allSource = 500000;
     // Resumable staging. When stagingPath is set the writer builds the output at
     // that fixed path beside the destination and journals every chromosome pair
     // it has made durable, so an interrupted run restarts at the first pair it
@@ -260,7 +260,9 @@ class Writer {
     // Callback loads one resolution at a time; matrix storage is bounded by one
     // chromosome-pair resolution plus the logical blocks queued for compression.
     void matrix(uint32_t chr1, uint32_t chr2, const std::function<Matrix(uint8_t, uint32_t)> &load);
-    void finish(const std::vector<Vector> &vectors);
+    // Optional finalization runs on the closed staged file before publication.
+    void finish(const std::vector<Vector> &vectors,
+                const std::function<void(const std::string &)> &beforePublish = {});
     // True when a resumed journal already holds this pair; the caller must then
     // skip it instead of decoding and writing it a second time.
     bool completed(uint32_t chr1, uint32_t chr2) const;

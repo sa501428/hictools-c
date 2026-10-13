@@ -52,7 +52,7 @@ class Cursor:
         return self.take(end - self.at + 1)[:-1].decode('utf-8')
 
 
-def inspect(path, bins, preferred, threads):
+def inspect(path, bins, preferred, threads, rebuild=False):
     """Read only header, matrix descriptors, footer entries and vector entry sizes."""
     st = path.stat()
     with path.open('rb') as stream:
@@ -79,11 +79,28 @@ def inspect(path, bins, preferred, threads):
         norms = [c.string() for _ in range(c.word())]
         if c.at != header_length:
             raise ValueError('V10 header length mismatch')
-        anchors = [r[0] for r in resolutions[0] if not r[1] and r[0] <= preferred]
+        real_lengths = [length for name, length in chroms if name.lower() != 'all']
+        genome_length = sum(real_lengths)
+        coordinate_scale = max(1000, (genome_length + max(real_lengths) - 1) // max(real_lengths),
+                               (genome_length + 2147483646) // 2147483647)
+        pseudo_length = max(1, genome_length // coordinate_scale)
+        finest = resolutions[0][0][0] if resolutions[0] else 1
+        display_resolution = max(1, (max(1, pseudo_length // bins) + finest - 1) // finest) * finest
+        if (pseudo_length + display_resolution - 1) // display_resolution > bins + 1:
+            minimum = (pseudo_length + bins) // (bins + 1)
+            display_resolution = ((minimum + finest - 1) // finest) * finest
+        source_preference = min(preferred, display_resolution * coordinate_scale)
         if not resolutions[0]:
             raise ValueError('All requires BP resolutions')
-        source = anchors[-1] if anchors else resolutions[0][0][0]
-        source_ri = next(i for i, r in enumerate(resolutions[0]) if r[0] == source)
+        def choose(allowed=None):
+            eligible = [r[0] for r in resolutions[0] if not r[1] and (allowed is None or r[0] in allowed)]
+            if not eligible: raise ValueError('All has no populated BP source')
+            below = [bin for bin in eligible if bin <= source_preference]
+            above = next((bin for bin in eligible if source_preference <= bin <= display_resolution * coordinate_scale), None)
+            if not below: return above or eligible[0]
+            base = below[-1]
+            return above if above and above * base < source_preference * source_preference else base
+        source = choose()
         f = Cursor(read(footer_at, 24))
         if f.take(4) != b'H10F' or f.word() != 1 or f.unpack('Q')[0] != footer_length:
             raise ValueError('invalid V10 footer')
@@ -94,6 +111,7 @@ def inspect(path, bins, preferred, threads):
         blocks = index_bytes = source_cells = source_blocks = 0
         all_ids = [i for i, (name, _) in enumerate(chroms) if name.lower() == 'all']
         all_pair = False
+        populated = set()
         for first in range(0, pairs, 4096):
             entries = read(footer_at + 24 + first * 24, min(4096, pairs - first) * 24)
             for a, b, at, size in struct.iter_unpack('<IIQQ', entries):
@@ -110,12 +128,31 @@ def inspect(path, bins, preferred, threads):
                     unit, mode, _, _, ri = z[:5]
                     occupied, il, nb = z[9], z[15], z[16]
                     blocks += nb; index_bytes += il
-                    if unit == 0 and ri == source_ri and not mode and a not in all_ids and b not in all_ids:
-                        source_cells += occupied; source_blocks += nb
-        if all_ids and not all_pair:
+                    if unit == 0 and not mode and occupied and a not in all_ids and b not in all_ids:
+                        populated.add(z[5])
+        if all_ids and not all_pair and not rebuild:
             raise ValueError('existing All header lacks an All/All matrix')
+        source = choose(populated or None)
+        source_resolution_pairs = {}
+        # Repeat only the small directory/descriptors so per-pair fallbacks are
+        # counted accurately without retaining O(pairs * resolutions) Python data.
+        for first in range(0, pairs, 4096):
+            entries = read(footer_at + 24 + first * 24, min(4096, pairs - first) * 24)
+            for a, b, at, size in struct.iter_unpack('<IIQQ', entries):
+                if a in all_ids or b in all_ids: continue
+                m = Cursor(read(at, size)); m.take(24)
+                samples = []
+                for _ in range(nres):
+                    z = m.unpack('4B3IB3xQQII2IQQ2I')
+                    if z[0] == 0 and not z[1] and z[9]: samples.append((z[5], z[9], z[16]))
+                if not samples: continue
+                allowed = {sample[0] for sample in samples}
+                selected = source if source in allowed else choose(allowed)
+                _, cells, count = next(sample for sample in samples if sample[0] == selected)
+                source_cells += cells; source_blocks += count
+                source_resolution_pairs[selected] = source_resolution_pairs.get(selected, 0) + 1
         max_entry = vector_entries = 0
-        for at, length in zip(locators[::2], locators[1::2]):
+        for kind, (at, length) in enumerate(zip(locators[::2], locators[1::2])):
             if not length:
                 continue
             v = Cursor(read(at, 16)); v.take(8); count = v.word(); v.take(4)
@@ -124,13 +161,32 @@ def inspect(path, bins, preferred, threads):
                 entry_length = struct.unpack('<I', read(at + offset, 4))[0]
                 if entry_length < 4 or entry_length > min(length - offset, 512 * (1 << 20)):
                     raise ValueError('invalid or oversized V10 vector entry')
+                if kind == 0 and rebuild:
+                    if entry_length < 12: raise ValueError('invalid normalization entry length')
+                    norm, chromosome = struct.unpack('<II', read(at + offset + 4, 8))
+                    if chromosome in all_ids:
+                        raise ValueError('cannot rebuild All while its normalization vectors exist')
                 max_entry = max(max_entry, entry_length); offset += entry_length
             if offset != length:
                 raise ValueError('invalid V10 vector index length')
             vector_entries += count
+    existing_action = 'rebuild' if all_ids and rebuild else 'preserve' if all_ids else 'create'
+    reported_length, reported_display, reported_bins = pseudo_length, display_resolution, (pseudo_length + display_resolution - 1) // display_resolution
+    reported_scale = coordinate_scale
+    if existing_action == 'preserve':
+        attrs = dict(attributes)
+        reported_length = chroms[all_ids[0]][1]
+        reported_bins = int(attrs['hicAll.binCount']) if 'hicAll.binCount' in attrs else None
+        reported_display = (int(attrs['hicAll.finestResolution']) * int(attrs.get('hicAll.storageStride', '1'))
+                            if 'hicAll.finestResolution' in attrs else None)
+        source = int(attrs['hicAll.sourceResolution']) if 'hicAll.sourceResolution' in attrs else None
+        reported_scale = int(attrs['hicAll.coordinateScale']) if 'hicAll.coordinateScale' in attrs else None
+        source_cells = source_blocks = 0
+        source_resolution_pairs = {}
     real = [length for name, length in chroms if name.lower() != 'all']
-    source_bins = sum((length + source - 1) // source for length in real)
-    pixels = bins * (bins + 1) // 2
+    source_bins = sum((length + source - 1) // source for length in real) if source else None
+    actual_bins = (pseudo_length + display_resolution - 1) // display_resolution
+    pixels = actual_bins * (actual_bins + 1) // 2
     # Conservative planning allowance, not a formal bound: worst accepted block
     # decoding, matrix metadata caches, header/footer copies, All and vector entry.
     estimated_ram = (8 * GIB + threads * 8 * (1 << 20) + pairs * (256 + 192 * nres)
@@ -141,29 +197,37 @@ def inspect(path, bins, preferred, threads):
                 chromosomes=len(chroms), matrix_pairs=pairs, resolutions=nres,
                 stored_blocks=blocks, block_index_bytes=index_bytes,
                 source_resolution_bp=source, source_cells=source_cells,
+                source_resolution_pairs=source_resolution_pairs,
                 source_blocks=source_blocks, genome_source_bins=source_bins,
-                existing_all=bool(all_ids), vector_entries=vector_entries,
+                existing_all=bool(all_ids), existing_all_action=existing_action, vector_entries=vector_entries,
                 max_vector_entry_bytes=max_entry, conservative_ram_estimate_bytes=estimated_ram,
                 all_bin_budget=bins, copy_threads=threads,
+                output_pseudo_length=reported_length, coordinate_scale=reported_scale,
+                display_resolution=reported_display, output_all_bins=reported_bins,
                 warnings=([f'Selected {source} bp source is finer than requested {preferred} bp; '
-                           'aggregation may take longer.'] if source < preferred else []))
+                           'aggregation may take longer.'] if existing_action != 'preserve' and source < preferred else
+                          [f'Selected {source} bp source is coarser than requested {preferred} bp; '
+                           'this avoids scanning an excessively fine anchor.'] if existing_action != 'preserve' and source > preferred else []))
 
 
 def preflight(args):
-    report = inspect(args.input, args.all_bins, args.all_source_resolution, args.threads)
+    report = inspect(args.input, args.all_bins, args.all_source_resolution, args.threads, args.rebuild_all)
+    if report['existing_all_action'] == 'preserve':
+        report['warnings'].append('Existing All will be preserved; use --rebuild-all to migrate it.')
     if report['conservative_ram_estimate_bytes'] > memory_bytes(args.memory) * 0.8:
         raise ValueError('metadata/block planning estimate exceeds 80% of requested RAM; request more RAM')
     if args.output.exists() and args.output != args.input and not args.overwrite:
         raise ValueError('output already exists; use a different path or explicit --overwrite')
     # Output is temporary beside the final target, also for in-place repair.
-    needed = (0 if report['existing_all'] and args.output == args.input else
+    needed = (0 if report['existing_all'] and not args.rebuild_all and args.output == args.input else
               report['input_bytes'] + max(2 * GIB, report['input_bytes'] // 20))
     free = shutil.disk_usage(args.output.parent).free
     if free < needed:
         raise ValueError(f'output filesystem needs about {needed / GIB:.1f} GiB free; has {free / GIB:.1f} GiB')
     report.update(output=str(args.output), requested_memory=args.memory,
                   required_free_space_bytes=needed, available_free_space_bytes=free,
-                  ideal_copy_seconds=report['input_bytes'] / (args.copy_gbps * 1e9))
+                  ideal_copy_seconds=(0 if report['existing_all_action'] == 'preserve' and args.output == args.input
+                                      else report['input_bytes'] / (args.copy_gbps * 1e9)))
     report['warnings'].append('Filesystem free space does not check user/project quotas; verify quota separately.')
     return report
 
@@ -186,6 +250,8 @@ def worker(args):
         print(json.dumps(report, indent=2), flush=True)
         command = [args.hic_v10, 'add-all', '-t', str(args.threads), '--all-bins', str(args.all_bins),
                    '--all-source-resolution', str(args.all_source_resolution)]
+        if args.rebuild_all:
+            command.append('--rebuild-all')
         if args.output == args.input:
             command += ['--in-place', str(args.input)]
         else:
@@ -216,8 +282,9 @@ def main(argv=None):
     p.add_argument('--partition')
     p.add_argument('--account')
     p.add_argument('--all-bins', type=int, default=500)
-    p.add_argument('--all-source-resolution', type=int, default=2500000)
+    p.add_argument('--all-source-resolution', type=int, default=500000)
     p.add_argument('--copy-gbps', type=float, default=0.5, help='Assumed end-to-end copy GB/s for estimate only')
+    p.add_argument('--rebuild-all', action='store_true', help='Reconstruct and replace an existing All')
     p.add_argument('--overwrite', action='store_true', help='Explicitly allow replacing an existing output')
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('--sbatch', default='sbatch')
@@ -252,6 +319,8 @@ def main(argv=None):
                     '--threads', str(args.threads), '--memory', args.memory,
                     '--all-bins', str(args.all_bins), '--all-source-resolution', str(args.all_source_resolution),
                     '--copy-gbps', str(args.copy_gbps)]
+        if args.rebuild_all:
+            command.append('--rebuild-all')
         if args.overwrite:
             command.append('--overwrite')
         job = run_dir / 'repair.sbatch'

@@ -12,7 +12,8 @@ def main():
     parser.add_argument('--in-place', action='store_true', help='Replace input atomically after validation')
     parser.add_argument('--hic-v10', default='hic_v10', help='Path to native hic_v10 executable')
     parser.add_argument('--all-bins', type=int, default=500, help='Maximum overview width (1..4096)')
-    parser.add_argument('--all-source-resolution', type=int, default=2500000)
+    parser.add_argument('--all-source-resolution', type=int, default=500000)
+    parser.add_argument('--rebuild-all', action='store_true')
     parser.add_argument('--level', type=int, default=6)
     parser.add_argument('-t', type=int, default=4)
     args = parser.parse_args()
@@ -22,6 +23,7 @@ def main():
     if not executable: parser.error('hic_v10 was not found; build with BUILD_V10=ON or pass --hic-v10')
     command = [executable, 'add-all', '--all-bins', str(args.all_bins),
                '--all-source-resolution', str(args.all_source_resolution), '--level', str(args.level), '-t', str(args.t)]
+    if args.rebuild_all: command.append('--rebuild-all')
     if args.in_place: command += ['--in-place', args.input]
     else: command += [args.input, args.output]
     subprocess.run(command, check=True)
